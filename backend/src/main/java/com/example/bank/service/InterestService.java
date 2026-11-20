@@ -44,11 +44,16 @@ public class InterestService {
     private final TransactionRepository transactions = new TransactionRepository();
     private final InterestRepository interest = new InterestRepository();
 
+    /**
+     * @param dataSource 接続の取得元
+     * @param clock      決算日の判定に使う時計
+     */
     public InterestService(Supplier<DataSource> dataSource, Clock clock) {
         this.dataSource = dataSource;
         this.clock = clock;
     }
 
+    /** @return アプリケーション既定のインスタンス */
     public static InterestService getDefault() { return DEFAULT; }
 
     /** 利息の見込み計算（記帳しない）。基準日を未来にすると現在の残高が続く前提の見込みになる。 */
@@ -65,6 +70,7 @@ public class InterestService {
     public InterestResult settle(String accountNo, LocalDate asOf) {
         LocalDate baseDate = checkBaseDate(asOf);
         return Transactions.inTransaction(dataSource.get(), c -> {
+            // 決算中に入出金が割り込むと、計算に使った残高と記帳後の残高がずれるため口座行をロックする
             Account account = BankService.lockExisting(c, accounts, accountNo);
             return settleLocked(c, account, baseDate, LocalDateTime.now(clock));
         });
@@ -73,11 +79,13 @@ public class InterestService {
     /** 解約済み以外の全口座の利息決算。口座ごとに別トランザクション（1 口座の失敗で全体を止めない）。 */
     public SettlementSummary settleAll(LocalDate asOf) {
         LocalDate baseDate = checkBaseDate(asOf);
+        // 対象口座の一覧だけ先に取り、決算は 1 口座ずつ短いトランザクションで行う（全口座を長時間ロックしない）
         List<String> accountNos = Transactions.readOnly(dataSource.get(), accounts::findOpenAccountNos);
         List<InterestResult> results = new ArrayList<>();
         for (String accountNo : accountNos) {
             try {
                 results.add(settle(accountNo, baseDate));
+            // 失敗した口座は結果に記録して次へ進む。同じ期間の再決算は lastSettledTo で防がれるので、後でやり直しても二重にならない
             } catch (BankException | DataAccessException e) {
                 results.add(new InterestResult(accountNo, null, null, null, 0, BigDecimal.ZERO, BigDecimal.ZERO,
                         BigDecimal.ZERO, BigDecimal.ZERO, false, "エラー: " + e.getMessage()));
@@ -101,10 +109,12 @@ public class InterestService {
         if (p.calc.days == 0) return p.toResult(false, "決算済み（対象期間なし）");
         String ccy = account.getCurrency();
 
+        // 決算記録を先に残す（利息 0 円でも期間を記録し、次回は翌日から計算する）
         interest.insertSettlement(c, account.getAccountNo(), p.from, p.to, p.calc, now);
         BigDecimal gross = p.calc.grossInterest;
         if (gross.signum() > 0) {
             BigDecimal balance = account.getBalance().add(gross);
+            // 利息（税引前）と税を別の明細にして、通帳上で税額が分かるようにする。冪等キーなし = システム処理
             transactions.insert(c, account.getAccountNo(), TxType.INTEREST, gross, balance, null,
                     "利息 " + p.from + "〜" + p.to, null, now);
             BigDecimal tax = p.calc.nationalTax.add(p.calc.localTax);
@@ -113,10 +123,12 @@ public class InterestService {
                 transactions.insert(c, account.getAccountNo(), TxType.TAX, tax, balance, null,
                         "国税 " + money(p.calc.nationalTax, ccy) + " 地方税 " + money(p.calc.localTax, ccy), null, now);
             }
+            // customerActivity = false: 利息の入金は休眠判定の「異動」に当たらないので最終異動日を更新しない
             accounts.updateBalance(c, account.getAccountNo(), balance, now, false);
         }
         if (p.overdraft != null && p.overdraft.grossInterest.signum() > 0) {
             // 当座貸越利息: 貸越残高（マイナス残高）の日々の合計 × 貸越利率 ÷ 365。極度額の範囲で徴収する
+            // 利息の記帳で残高が変わっている可能性があるため、最新の残高を読み直す（行ロックは取得済み）
             Account current = BankService.lockExisting(c, accounts, account.getAccountNo());
             BigDecimal headroom = current.getBalance().add(current.getOverdraftLimit()).max(BigDecimal.ZERO);
             BigDecimal charge = p.overdraft.grossInterest.min(headroom);
@@ -133,12 +145,14 @@ public class InterestService {
         return p.toResult(true, gross.signum() > 0 ? "決算済み" : "決算済み（利息 0 円）");
     }
 
+    // 前回決算の翌日（初回は開設日）〜基準日の前日を計算期間とし、期間中の残高の推移から積数を求める
     private Period compute(Connection c, Account account, LocalDate asOf) throws SQLException {
         if ("CLOSED".equals(account.getStatus())) return Period.empty(account);
         String accountNo = account.getAccountNo();
         LocalDate lastTo = interest.lastSettledTo(c, accountNo);
         LocalDate from = lastTo != null ? lastTo.plusDays(1) : LocalDateTime.parse(account.getOpenedAt()).toLocalDate();
         LocalDate to = asOf.minusDays(1);
+        // 計算期間がない（同じ日に 2 回決算した等）場合は日数 0 の結果を返す（呼び出し側で「決算済み」と扱う）
         if (to.isBefore(from)) return new Period(account, from, to, InterestCalculator.calculate(
                 BigDecimal.ZERO, new ArrayList<InterestCalculator.BalanceChange>(),
                 new ArrayList<InterestCalculator.Rate>(), from, to));
@@ -153,6 +167,7 @@ public class InterestService {
             Period p = new Period(account, from, to, none);
             BigDecimal odRate = overdraftRate(c, accountNo);
             if (odRate.signum() > 0) {
+                // マイナス残高（貸越額）を正の値に変換し、預金利息と同じ積数計算で貸越利息を求める
                 List<InterestCalculator.BalanceChange> negative = new ArrayList<>();
                 for (InterestCalculator.BalanceChange ch : changes) {
                     negative.add(new InterestCalculator.BalanceChange(ch.at, ch.balanceAfter.negate().max(BigDecimal.ZERO)));
@@ -211,6 +226,7 @@ public class InterestService {
             this.calc = calc;
         }
 
+        // 計算対象外の口座用の空の結果（日数 0）
         static Period empty(Account account) {
             LocalDate d = LocalDate.of(2000, 1, 1);
             return new Period(account, null, null, InterestCalculator.calculate(BigDecimal.ZERO,
@@ -218,6 +234,7 @@ public class InterestService {
                     d, d.minusDays(1)));
         }
 
+        // 画面・API 用の結果に変換する（日数 0 のときは期間を null にする）
         InterestResult toResult(boolean settled, String note) {
             boolean hasPeriod = calc.days > 0;
             return new InterestResult(account.getAccountNo(), account.getAccountType(),

@@ -14,6 +14,16 @@ public final class TransactionPage {
     private final BigDecimal totalIn;
     private final BigDecimal totalOut;
 
+    /**
+     * @param items          このページの明細
+     * @param page           ページ番号（1 始まり）
+     * @param size           1 ページの件数
+     * @param total          条件に合う全件数
+     * @param openingBalance 期間開始時点の残高
+     * @param closingBalance 期間終了時点の残高
+     * @param totalIn        入金合計
+     * @param totalOut       出金合計
+     */
     public TransactionPage(List<AccountTransaction> items, int page, int size, long total, BigDecimal openingBalance,
                            BigDecimal closingBalance, BigDecimal totalIn, BigDecimal totalOut) {
         this.items = items;
@@ -26,10 +36,15 @@ public final class TransactionPage {
         this.totalOut = totalOut;
     }
 
+    /** @return このページの明細 */
     public List<AccountTransaction> getItems() { return items; }
+    /** @return ページ番号（1 始まり） */
     public int getPage() { return page; }
+    /** @return 1 ページの件数 */
     public int getSize() { return size; }
+    /** @return 全件数 */
     public long getTotal() { return total; }
+    /** @return 次のページがあれば true（JSON で hasNext として出力するため is + HasNext の名前にしている） */
     public boolean isHasNext() { return (long) page * size < total; }
     /** 期間開始時点の残高（開始日指定なしは 0） */
     public BigDecimal getOpeningBalance() { return openingBalance; }

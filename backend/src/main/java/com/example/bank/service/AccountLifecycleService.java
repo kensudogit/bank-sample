@@ -39,9 +39,13 @@ import java.util.function.Supplier;
  * </ul>
  */
 public class AccountLifecycleService {
+    /** 休眠前通知の対象になる、最終異動からの年数 */
     public static final int NOTICE_YEARS = 9;
+    /** 休眠化の対象になる、最終異動からの年数 */
     public static final int DORMANT_YEARS = 10;
+    /** 休眠前通知が必要になる残高の下限（円） */
     public static final BigDecimal NOTICE_MIN_BALANCE = new BigDecimal("10000");
+    /** 通知してから休眠化できるまでの期間（月） */
     public static final int NOTICE_WAIT_MONTHS = 1;
 
     private static final AccountLifecycleService DEFAULT =
@@ -55,12 +59,17 @@ public class AccountLifecycleService {
     private final TransactionRepository transactions = new TransactionRepository();
     private final OperationRequestRepository requests = new OperationRequestRepository();
 
+    /**
+     * @param dataSource 接続の取得元
+     * @param clock      基準日・処理日時の取得元
+     */
     public AccountLifecycleService(Supplier<DataSource> dataSource, Clock clock) {
         this.dataSource = dataSource;
         this.clock = clock;
         this.interestService = new InterestService(dataSource, clock);
     }
 
+    /** @return アプリケーション既定のインスタンス */
     public static AccountLifecycleService getDefault() { return DEFAULT; }
 
     /**
@@ -76,6 +85,7 @@ public class AccountLifecycleService {
 
             Account account;
             Account payout = null;
+            // 現金払戻しなら解約口座だけ、口座への払戻しなら 2 口座をロックする
             if (payoutAccountNo == null) {
                 account = BankService.lockExisting(c, accounts, accountNo);
             } else {
@@ -94,7 +104,9 @@ public class AccountLifecycleService {
             if (!account.isJpy() && account.getBalance().signum() != 0) {
                 throw new BankException(ErrorCode.ACCOUNT_NOT_EMPTY, accountNo);
             }
+            // 当座貸越でマイナス残高のまま解約すると貸越金が回収できなくなるため、先に返済してもらう
             if (account.getBalance().signum() < 0) throw new BankException(ErrorCode.ACCOUNT_NOT_EMPTY, accountNo);
+            // 融資の返済口座を解約すると約定返済の引落し先がなくなるため、返済中の融資があれば解約させない
             if (!com.example.bank.repository.ProductRepository.query(c, "SELECT loan_id FROM loan "
                     + "WHERE repayment_account_no = ? AND status IN ('CONTRACTED', 'ACTIVE', 'DELINQUENT')", accountNo).isEmpty()) {
                 throw new BankException(ErrorCode.LOAN_OUTSTANDING, accountNo);
@@ -109,9 +121,12 @@ public class AccountLifecycleService {
                 }
             }
 
+            // 口座行ロックを持ったまま同じトランザクションで利息を決算する（決算と解約の間に入出金が割り込まない）
             InterestResult interest = interestService.settleLocked(c, account, now.toLocalDate(), now);
+            // 利息入金後の残高を読み直す（ロック済みの行なので再取得しても待たされない）
             BigDecimal balance = BankService.lockExisting(c, accounts, accountNo).getBalance();  // after interest
             if (balance.signum() > 0) {
+                // 出金側（CLOSE_PAYOUT）と入金側（TRANSFER_IN）を同じ冪等キーで記録し、元帳検証で金額の対応を確かめられるようにする
                 transactions.insert(c, accountNo, TxType.CLOSE_PAYOUT, balance, BigDecimal.ZERO, payoutAccountNo,
                         "解約払戻し", idempotencyKey, now);
                 if (payout != null) {
@@ -121,6 +136,7 @@ public class AccountLifecycleService {
                             "解約払戻し", idempotencyKey, now);
                 }
             }
+            // 残高 0・CLOSED にする。ここまでがすべて 1 トランザクションなので、途中で失敗すれば利息決算も払戻しも取り消される
             accounts.close(c, accountNo, now);
             return new CloseResult(accountNo, interest, balance, payoutAccountNo, Timestamps.format(now));
         });
@@ -136,6 +152,7 @@ public class AccountLifecycleService {
             Customer customer = customers.findById(c, account.getCustomerId())
                     .orElseThrow(() -> new BankException(ErrorCode.CUSTOMER_NOT_FOUND, account.getCustomerId()));
             if (!customer.isVerified()) throw new BankException(ErrorCode.KYC_NOT_VERIFIED, customer.getCustomerId());
+            // 休眠解除の申出は「異動」に当たるため、最終異動日を現在にする（すぐに再び休眠対象にならない）
             accounts.reactivate(c, accountNo, now);
             return accounts.findById(c, accountNo).orElseThrow(() -> new SQLException("account vanished"));
         });
@@ -151,6 +168,7 @@ public class AccountLifecycleService {
     public DormancyReport runDormancy(LocalDate asOf) {
         LocalDate today = LocalDate.now(clock);
         LocalDate baseDate = asOf == null ? today : asOf;
+        // 未来日で実行すると、まだ条件を満たしていない口座を休眠にしてしまうため拒否する
         if (baseDate.isAfter(today)) throw new BankException(ErrorCode.INVALID_BASE_DATE);
         return Transactions.inTransaction(dataSource.get(), c -> {
             LocalDateTime now = LocalDateTime.now(clock);
@@ -170,9 +188,11 @@ public class AccountLifecycleService {
         });
     }
 
+    // 候補（9 年以上異動なし）を 1 回の検索で取り、通知対象と休眠対象に振り分ける
     private DormancyReport report(Connection c, LocalDate asOf, int noticed, int madeDormant) throws SQLException {
         LocalDateTime noticeCutoff = asOf.minusYears(NOTICE_YEARS).atStartOfDay();
         LocalDateTime dormantCutoff = asOf.minusYears(DORMANT_YEARS).atStartOfDay();
+        // 通知日時がこれより前なら「通知から 1 か月経過」とみなす
         LocalDateTime noticeDeadline = asOf.minusMonths(NOTICE_WAIT_MONTHS).plusDays(1).atStartOfDay();
 
         List<Account> noticeTargets = new ArrayList<>();
@@ -189,6 +209,7 @@ public class AccountLifecycleService {
                 accounts.findByStatus(c, "DORMANT"), noticed, madeDormant);
     }
 
+    // Account は日時を ISO 文字列で持つため、比較のために LocalDateTime に戻す
     private static LocalDateTime parse(String iso) {
         return iso == null ? null : LocalDateTime.parse(iso);
     }

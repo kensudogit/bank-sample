@@ -11,6 +11,7 @@ import { BalanceChart } from "@/components/BalanceChart";
 import { DepositPanels } from "@/components/DepositPanels";
 import { IconArrowLeft, IconTransfer } from "@/components/Icons";
 import { InterestPreview } from "@/components/InterestPreview";
+import { LedgerTrace } from "@/components/LedgerTrace";
 import { TransactionHistory } from "@/components/TransactionHistory";
 import { accountTypeLabel, formatDate, formatMoney, formatYen, normalizeAmount, statusLabel } from "@/lib/format";
 import type { OperationResult } from "@/lib/types";
@@ -112,6 +113,7 @@ export default function AccountDetailPage() {
         <InterestPreview accountNo={account.accountNo} currency={account.currency} />
       )}
       <TransactionHistory accountNo={account.accountNo} currency={account.currency} />
+      {isStaff && <LedgerTrace accountNo={account.accountNo} currency={account.currency} />}
       {isSupervisor && account.accountType !== "TIME" && (account.status === "ACTIVE" || account.status === "CLOSED") && (
         <CloseAccount account={account} />
       )}

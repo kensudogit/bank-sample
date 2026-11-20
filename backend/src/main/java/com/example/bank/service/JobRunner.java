@@ -30,13 +30,17 @@ import java.util.function.Supplier;
  * </ul>
  */
 public class JobRunner {
+    // ジョブ名は JOB_RUN の主キーの一部（名前を変えると、同じ日に「未実行」と判断されて再実行される）
     public static final String DORMANCY = "DORMANCY";
     public static final String INTEREST = "INTEREST_SETTLEMENT";
     public static final String REQUEST_CLEANUP = "REQUEST_CLEANUP";
     public static final String TIME_MATURITY = "TIME_MATURITY";
     public static final String LOAN_DUE = "LOAN_DUE";
     public static final String DIRECT_DEBIT = "DIRECT_DEBIT";
+    public static final String LEDGER_CHECK = "LEDGER_CHECK";
+    /** この時刻より前はジョブを開始しない（前日分の取引が出そろってから処理する） */
     public static final LocalTime START_TIME = LocalTime.of(1, 0);
+    /** 冪等キーの保存日数（これより古い再送は新しい要求として扱われる） */
     public static final int REQUEST_RETENTION_DAYS = 90;
     private static final Logger LOG = LogManager.getLogger(JobRunner.class);
 
@@ -51,8 +55,15 @@ public class JobRunner {
     private final LoanService loans;
     private final PaymentService payments;
     private final AmlService aml;
+    private final LedgerService ledger;
     private final JobRunRepository runs = new JobRunRepository();
 
+    /**
+     * 各ジョブのサービスを同じ DataSource・時計で生成する（テストでは時計を固定して業務日を指定できる）。
+     *
+     * @param dataSource 接続の取得元
+     * @param clock      業務日・開始時刻の判定に使う時計
+     */
     public JobRunner(Supplier<DataSource> dataSource, Clock clock) {
         this.dataSource = dataSource;
         this.clock = clock;
@@ -63,6 +74,7 @@ public class JobRunner {
         this.loans = new LoanService(dataSource, clock);
         this.payments = new PaymentService(dataSource, clock);
         this.aml = new AmlService(dataSource, clock);
+        this.ledger = new LedgerService(dataSource, clock);
     }
 
     /** AML の取引モニタリング（定期チェックのたびに、前回の続きから）。 */
@@ -70,15 +82,18 @@ public class JobRunner {
         return aml.scan();
     }
 
+    /** @return アプリケーション既定のインスタンス */
     public static JobRunner getDefault() { return DEFAULT; }
 
     /** 期限の来たジョブを実行し、実行したジョブ名を返す。 */
     public List<String> runDue() {
         LocalDateTime now = LocalDateTime.now(clock);
         List<String> ran = new ArrayList<>();
+        // 定期チェックは 10 分ごとに呼ばれるが、開始時刻前は何もしない
         if (now.toLocalTime().isBefore(START_TIME)) return ran;
         LocalDate today = now.toLocalDate();
 
+        // 各ジョブは独立に実行権を取る。あるジョブが失敗しても残りのジョブは実行される
         if (run(DORMANCY, today, () -> {
             DormancyReport r = lifecycle.runDormancy(today);
             return "休眠前通知 " + r.getNoticed() + " 件・休眠化 " + r.getMadeDormant() + " 件";
@@ -101,12 +116,24 @@ public class JobRunner {
 
         boolean interestDay = today.getDayOfMonth() == 1
                 && (today.getMonth() == Month.MARCH || today.getMonth() == Month.SEPTEMBER);
+        // 決算日以外は実行権も取らない（JOB_RUN に余計な行を作らない）
         if (interestDay && run(INTEREST, today, () -> {
             SettlementSummary s = interest.settleAll(today);
             return "決算 " + s.getSettledCount() + " 口座・利息 " + s.getTotalGross() + " 円・税 " + s.getTotalTax() + " 円";
         })) ran.add(INTEREST);
 
+        if (run(LEDGER_CHECK, today, () -> {
+            Map<String, Object> r = ledger.verify(null);
+            String summary = "元帳検証 " + r.get("accounts") + " 口座・" + r.get("transactions") + " 明細";
+            if (!Boolean.TRUE.equals(r.get("valid"))) {
+                // Reported as a failed job so it shows up on the operations screen and in the audit log
+                throw new IllegalStateException(summary + "：不整合 " + ((List<?>) r.get("problems")).size() + " 件");
+            }
+            return summary + "：問題なし";
+        })) ran.add(LEDGER_CHECK);
+
         if (run(REQUEST_CLEANUP, today, () -> {
+            // 保存期間を過ぎた冪等キーを削除する
             int deleted = Transactions.inTransaction(dataSource.get(),
                     c -> runs.deleteRequestsBefore(c, now.minusDays(REQUEST_RETENTION_DAYS)));
             return "冪等キー " + deleted + " 件を削除";
@@ -114,16 +141,25 @@ public class JobRunner {
         return ran;
     }
 
+    /**
+     * 直近のジョブ実行履歴。
+     *
+     * @param limit 最大件数
+     * @return 新しい順の実行履歴
+     */
     public List<Map<String, Object>> recentRuns(int limit) {
         return Transactions.readOnly(dataSource.get(), c -> runs.recent(c, limit));
     }
 
+    // ジョブ本体（戻り値は実行結果の要約。実行履歴と監査ログに残す）
     private interface Job {
         String execute();
     }
 
     /** @return true: このインスタンスで実行した（成功・失敗とも） */
     private boolean run(String jobName, LocalDate runDate, Job job) {
+        // 実行権の取得は短い独立トランザクションで先にコミットする。ジョブ本体と同じトランザクションにすると、
+        // 実行中は他のインスタンスが主キーの確定待ちでブロックされ、失敗時には実行権ごと消えて再実行されてしまう
         boolean claimed = Transactions.inTransaction(dataSource.get(),
                 c -> runs.claim(c, jobName, runDate, LocalDateTime.now(clock)));
         if (!claimed) return false;
@@ -132,6 +168,7 @@ public class JobRunner {
         try {
             detail = job.execute();
             outcome = AuditService.SUCCESS;
+        // 失敗も「実行済み」として記録する（同じ日に自動で再実行はしない。必要なら運用者が原因を確認してから対処する）
         } catch (RuntimeException e) {
             LOG.error("job {} failed", jobName, e);
             detail = e.getClass().getSimpleName() + ": " + e.getMessage();
@@ -143,6 +180,7 @@ public class JobRunner {
             runs.finish(c, jobName, runDate, finalOutcome, finalDetail, LocalDateTime.now(clock));
             return null;
         });
+        // バッチの実行も「誰が（SYSTEM）・何を・結果」として監査ログに残す
         audit.record(LoginUser.SYSTEM, null, "job:" + jobName, runDate.toString(), outcome, detail, null);
         LOG.info("job {} {}: {}", jobName, outcome, detail);
         return true;

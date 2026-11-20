@@ -59,6 +59,44 @@ export interface AuditEntry {
   rowHash: string;
 }
 
+export interface LedgerProblem {
+  accountNo: string;
+  txId: number | null;
+  check: string;
+  detail: string;
+}
+
+export interface LedgerVerification {
+  checkedAt: string;
+  accounts: number;
+  transactions: number;
+  valid: boolean;
+  problems: LedgerProblem[];
+}
+
+export interface LedgerOperation {
+  auditId: number;
+  occurredAt: string;
+  userId: string | null;
+  userRole: string | null;
+  action: string;
+  clientIp: string | null;
+  outcome: string;
+}
+
+export interface LedgerTraceItem {
+  txId: number;
+  txType: TxType;
+  amount: number;
+  balanceAfter: number;
+  counterpartyAccountNo: string | null;
+  memo: string | null;
+  createdAt: string;
+  rowHash: string | null;
+  operations: LedgerOperation[];
+  origin?: string;
+}
+
 export interface AuditVerification {
   valid: boolean;
   checked: number;

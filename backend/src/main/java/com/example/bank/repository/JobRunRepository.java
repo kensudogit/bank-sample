@@ -26,6 +26,8 @@ public class JobRunRepository {
      */
     public boolean claim(Connection c, String jobName, LocalDate runDate, LocalDateTime now) throws SQLException {
         try (PreparedStatement ps = c.prepareStatement(
+                // 「まだ実行していなければ実行する」を SELECT → INSERT で行うと、2 台が同時に「未実行」と判断してしまう。
+                // INSERT 一発にして主キー違反で負けた側を判定すれば、同時に動いても実行権を取れるのは 1 台だけ
                 "INSERT INTO job_run (job_name, run_date, started_at) VALUES (?, ?, ?)")) {
             ps.setString(1, jobName);
             ps.setDate(2, Date.valueOf(runDate));
@@ -40,6 +42,17 @@ public class JobRunRepository {
         }
     }
 
+    /**
+     * ジョブの終了を記録する。
+     *
+     * @param c       DB 接続
+     * @param jobName ジョブ名
+     * @param runDate 業務日
+     * @param outcome 結果（SUCCESS / FAILURE など）
+     * @param detail  詳細（列長に合わせて 400 文字で切り詰める）
+     * @param now     終了日時
+     * @throws SQLException DB アクセスに失敗した場合
+     */
     public void finish(Connection c, String jobName, LocalDate runDate, String outcome, String detail,
                        LocalDateTime now) throws SQLException {
         try (PreparedStatement ps = c.prepareStatement(
@@ -77,6 +90,7 @@ public class JobRunRepository {
 
     /** 古い冪等キーを削除する。 */
     public int deleteRequestsBefore(Connection c, LocalDateTime cutoff) throws SQLException {
+        // 冪等キーの保存期間を過ぎた行を消して表の肥大化を防ぐ（保存期間より後の再送は新しい要求として扱われる）
         try (PreparedStatement ps = c.prepareStatement("DELETE FROM operation_request WHERE created_at < ?")) {
             ps.setTimestamp(1, Timestamp.valueOf(cutoff));
             return ps.executeUpdate();

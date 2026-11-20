@@ -39,9 +39,13 @@ import java.util.function.Supplier;
  * </ul>
  */
 public class DepositProductService {
+    /** 定期預金で選べる期間（月） */
     public static final List<Integer> TIME_TERMS = Arrays.asList(3, 6, 12, 36, 60);
+    /** 定期預金の最低預入額（円） */
     public static final BigDecimal TIME_MIN = new BigDecimal("10000");
+    /** 通知預金の最低預入額（円） */
     public static final BigDecimal NOTICE_MIN = new BigDecimal("50000");
+    /** 通知預金: 通知から払出し可能になるまでの日数 */
     public static final int NOTICE_DAYS = 2;
     /** 両替 1 回あたりの上限（円換算） */
     public static final BigDecimal FX_MAX_JPY = new BigDecimal("10000000");
@@ -57,15 +61,25 @@ public class DepositProductService {
     private final NoticeRepository notices = new NoticeRepository();
     private final ProductRepository products = new ProductRepository();
 
+    /**
+     * @param dataSource 接続の取得元
+     * @param clock      金利の基準日・処理日時の取得元
+     */
     public DepositProductService(Supplier<DataSource> dataSource, Clock clock) {
         this.dataSource = dataSource;
         this.clock = clock;
     }
 
+    /** @return アプリケーション既定のインスタンス */
     public static DepositProductService getDefault() { return DEFAULT; }
 
     // ===================== time deposits =====================
 
+    /**
+     * 本日時点の定期預金金利（期間別）。
+     *
+     * @return 期間と金利の一覧
+     */
     public List<Map<String, Object>> timeDepositRates() {
         return Transactions.readOnly(dataSource.get(), c -> products.timeDepositRates(c, LocalDate.now(clock)));
     }
@@ -77,6 +91,7 @@ public class DepositProductService {
      */
     public Map<String, Object> createTimeDeposit(String sourceAccountNo, BigDecimal amount, int termMonths,
                                                  String instruction, String idempotencyKey) {
+        // 入力チェックはトランザクションの前に済ませる
         BankService.checkAmount(amount);
         if (amount.compareTo(TIME_MIN) < 0) throw new BankException(ErrorCode.MINIMUM_AMOUNT, "10,000");
         if (!TIME_TERMS.contains(termMonths)) throw new BankException(ErrorCode.VALIDATION_ERROR);
@@ -87,10 +102,12 @@ public class DepositProductService {
             LocalDateTime now = LocalDateTime.now(clock);
             LocalDate today = now.toLocalDate();
             BankService.registerRequest(c, idempotencyKey, "TIME_OPEN", now, requests);
+            // 資金口座をロックしてから残高を確認する（新しい定期預金口座はまだ誰も参照できないのでロック不要）
             Account source = BankService.lockActive(c, accounts, sourceAccountNo);
             if (!"ORDINARY".equals(source.getAccountType()) && !"SAVINGS".equals(source.getAccountType())) {
                 throw new BankException(ErrorCode.ACCOUNT_TYPE_NOT_ALLOWED, sourceAccountNo);
             }
+            // 金利は作成時点の店頭金利で固定し、契約に記録する（後で金利表が変わっても満期まで変わらない）
             BigDecimal rate = products.timeDepositRate(c, termMonths, today);
             if (rate == null) throw new BankException(ErrorCode.VALIDATION_ERROR);
             BigDecimal sourceBalance = BankService.debit(source, amount);
@@ -101,6 +118,7 @@ public class DepositProductService {
             products.insertTimeDeposit(c, accountNo, amount, rate, termMonths, today, maturity, instruction,
                     sourceAccountNo);
             accounts.updateBalance(c, sourceAccountNo, sourceBalance, now, true);
+            // 振込と同じく出金側・入金側を同じ冪等キーで記録し、元帳検証で対応を確かめられるようにする
             transactions.insert(c, sourceAccountNo, TxType.TRANSFER_OUT, amount, sourceBalance, accountNo,
                     "定期預金へ", idempotencyKey, now);
             transactions.insert(c, accountNo, TxType.TRANSFER_IN, amount, amount, sourceAccountNo,
@@ -109,6 +127,13 @@ public class DepositProductService {
         });
     }
 
+    /**
+     * 定期預金の内容と満期時の見込み利息。
+     *
+     * @param accountNo 定期預金の口座番号
+     * @return 契約内容
+     * @throws BankException 定期預金が見つからない場合
+     */
     public Map<String, Object> getTimeDeposit(String accountNo) {
         return Transactions.readOnly(dataSource.get(), c -> {
             Map<String, Object> m = timeDepositView(c, accountNo);
@@ -122,6 +147,7 @@ public class DepositProductService {
         return Transactions.inTransaction(dataSource.get(), c -> {
             LocalDateTime now = LocalDateTime.now(clock);
             BankService.registerRequest(c, idempotencyKey, "TIME_CANCEL", now, requests);
+            // 口座行と契約行をロックし、満期処理（夜間バッチ）と中途解約が同時に走って二重に払い戻すのを防ぐ
             Map<String, Object> td = lockActiveTimeDeposit(c, accountNo);
             BigDecimal earlyRate = products.depositRate(c, "ORDINARY", now.toLocalDate());
             Map<String, Object> result = payout(c, accountNo, td, earlyRate, now.toLocalDate(), now, "中途解約");
@@ -132,12 +158,14 @@ public class DepositProductService {
 
     /** 満期を迎えた定期預金を処理する（夜間バッチ）。口座ごとに別トランザクション。 */
     public List<Map<String, Object>> processMaturities(LocalDate asOf) {
+        // 対象の一覧だけ先に取り、処理は 1 件ずつ短いトランザクションで行う
         List<String> due = Transactions.readOnly(dataSource.get(), c -> products.dueTimeDeposits(c, asOf));
         List<Map<String, Object>> results = new ArrayList<>();
         for (String accountNo : due) {
             results.add(Transactions.inTransaction(dataSource.get(), c -> {
                 LocalDateTime now = LocalDateTime.now(clock);
                 Map<String, Object> td = products.lockTimeDeposit(c, accountNo);
+                // ロック後に状態を確かめ直す（一覧取得後に中途解約された契約は処理しない）
                 if (td == null || !"ACTIVE".equals(td.get("status"))) return null;
                 LocalDate maturity = LocalDate.parse((String) td.get("maturityDate"));
                 if ("ROLLOVER".equals(td.get("maturityInstruction"))) return rollover(c, accountNo, td, maturity, now);
@@ -150,6 +178,7 @@ public class DepositProductService {
         return results;
     }
 
+    // 定期預金口座が取引可能で、契約が有効であることを確かめて契約行をロックする
     private Map<String, Object> lockActiveTimeDeposit(Connection c, String accountNo) throws SQLException {
         Account account = BankService.lockActive(c, accounts, accountNo);
         if (!"TIME".equals(account.getAccountType())) {
@@ -172,6 +201,7 @@ public class DepositProductService {
         BigDecimal local = InterestCalculator.tax(gross, InterestCalculator.LOCAL_TAX_RATE);
         BigDecimal net = gross.subtract(national).subtract(local);
 
+        // 定期預金口座 → 資金口座の順にロックする。定期預金口座は振込の対象にならないため、振込（口座番号順のロック）とデッドロックしない
         Account account = BankService.lockExisting(c, accounts, accountNo);
         String linked = (String) td.get("linkedAccountNo");
         Account target = BankService.lockExisting(c, accounts, linked);
@@ -189,6 +219,7 @@ public class DepositProductService {
                         "国税 " + national + "円 地方税 " + local + "円", null, now);
             }
         }
+        // 定期預金口座から全額を払い出し、資金口座への入金と対にして記録する
         transactions.insert(c, accountNo, TxType.CLOSE_PAYOUT, balance, BigDecimal.ZERO, linked,
                 "定期預金 " + label, null, now);
         BigDecimal targetBalance = target.getBalance().add(balance);
@@ -234,6 +265,7 @@ public class DepositProductService {
             }
             accounts.updateBalance(c, accountNo, balance, now, false);
         }
+        // 継続後は満期日時点の店頭金利を適用する（金利表に該当がなければ従来の金利のまま）
         BigDecimal newRate = products.timeDepositRate(c, term, maturity);
         if (newRate == null) newRate = rate;
         products.rolloverTimeDeposit(c, accountNo, balance, newRate, maturity, maturity.plusMonths(term));
@@ -249,6 +281,7 @@ public class DepositProductService {
         return m;
     }
 
+    // 契約内容に満期時の見込み利息を加えて返す（画面表示用）
     private Map<String, Object> timeDepositView(Connection c, String accountNo) throws SQLException {
         Map<String, Object> td = products.findTimeDeposit(c, accountNo);
         if (td == null) return null;
@@ -275,6 +308,7 @@ public class DepositProductService {
             if (!"NOTICE".equals(account.getAccountType())) {
                 throw new BankException(ErrorCode.ACCOUNT_TYPE_NOT_ALLOWED, accountNo);
             }
+            // 通知の時点で残高を超える金額は払い出せないので受け付けない
             if (amount.compareTo(account.getBalance()) > 0) {
                 throw new BankException(ErrorCode.INSUFFICIENT_FUNDS, accountNo);
             }
@@ -282,6 +316,7 @@ public class DepositProductService {
             LocalDate earliest = opened.plusDays(BankService.NOTICE_HOLD_DAYS);
             LocalDate available = now.toLocalDate().plusDays(NOTICE_DAYS);
             if (available.isBefore(earliest)) available = earliest;
+            // 払出し可能日が休業日なら翌営業日にずらす
             available = BusinessCalendar.onOrAfter(c, available);
             long id = notices.insert(c, accountNo, amount, now, available);
             Map<String, Object> m = new LinkedHashMap<>();
@@ -293,6 +328,13 @@ public class DepositProductService {
         });
     }
 
+    /**
+     * 払出し通知を取り消す。
+     *
+     * @param accountNo 口座番号
+     * @param noticeId  通知 ID
+     * @throws BankException 該当する未使用の通知がない場合
+     */
     public void cancelNotice(String accountNo, long noticeId) {
         Transactions.inTransaction(dataSource.get(), c -> {
             if (notices.cancel(c, accountNo, noticeId) != 1) throw new BankException(ErrorCode.VALIDATION_ERROR);
@@ -300,18 +342,30 @@ public class DepositProductService {
         });
     }
 
+    /**
+     * 口座の払出し通知一覧。
+     *
+     * @param accountNo 口座番号
+     * @return 通知一覧
+     */
     public List<Map<String, Object>> listNotices(String accountNo) {
         return Transactions.readOnly(dataSource.get(), c -> notices.list(c, accountNo));
     }
 
     // ===================== foreign currency =====================
 
+    /**
+     * 為替レート一覧。
+     *
+     * @return 通貨ごとの仲値・売値・買値
+     */
     public List<Map<String, Object>> fxRates() {
         return Transactions.readOnly(dataSource.get(), products::fxRates);
     }
 
     /** 為替レート（仲値・スプレッド）の更新（役席。公示相場の登録）。 */
     public List<Map<String, Object>> updateFxRate(String currency, BigDecimal ttm, BigDecimal spread, String by) {
+        // スプレッドが仲値以上だと買値（TTB）が 0 以下になるため拒否する
         if (ttm == null || ttm.signum() <= 0 || spread == null || spread.signum() < 0 || spread.compareTo(ttm) >= 0) {
             throw new BankException(ErrorCode.VALIDATION_ERROR);
         }
@@ -333,6 +387,7 @@ public class DepositProductService {
         return Transactions.inTransaction(dataSource.get(), c -> {
             LocalDateTime now = LocalDateTime.now(clock);
             BankService.registerRequest(c, idempotencyKey, "FX", now, requests);
+            // 振込と同じく口座番号の小さい順にロックしてデッドロックを避ける
             boolean fromFirst = fromAccountNo.compareTo(toAccountNo) < 0;
             Account first = BankService.lockActive(c, accounts, fromFirst ? fromAccountNo : toAccountNo);
             Account second = BankService.lockActive(c, accounts, fromFirst ? toAccountNo : fromAccountNo);
@@ -356,12 +411,14 @@ public class DepositProductService {
                 throw new BankException(ErrorCode.VALIDATION_ERROR);
             }
             if (minor.signum() <= 0) throw new BankException(ErrorCode.VALIDATION_ERROR);
+            // 顧客が外貨を買うときは TTS（仲値 + スプレッド）、売るときは TTB（仲値 − スプレッド）を適用する
             BigDecimal applied = buying ? rate[0].add(rate[1]) : rate[0].subtract(rate[1]);
             BigDecimal yen = buying ? DepositMath.yenToBuy(minor, currency, applied)
                                     : DepositMath.yenFromSell(minor, currency, applied);
             if (yen.compareTo(FX_MAX_JPY) > 0) throw new BankException(ErrorCode.LIMIT_EXCEEDED);
             if (yen.signum() <= 0) throw new BankException(ErrorCode.VALIDATION_ERROR);
 
+            // 金額は口座の通貨の最小単位（円口座は円、外貨口座はセント）で記帳する
             BigDecimal outAmount = buying ? yen : minor;
             BigDecimal inAmount = buying ? minor : yen;
             BigDecimal fromBalance = BankService.debit(from, outAmount);

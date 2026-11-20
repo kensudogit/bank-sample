@@ -24,6 +24,8 @@ public class TransactionRepository {
             + "prev_hash, row_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
     private static final String COLS =
             "tx_id, account_no, tx_type, amount, balance_after, counterparty_account_no, memo, created_at";
+    // ※ 集計 SQL（totals）で入金として数える種別。現状は TxType.isCredit にある FX_IN / LOAN_DISB / REMIT_IN を含まず、
+    //   これらは出金合計に入る。種別を追加・変更するときは両方を確認すること
     /** 残高が増える取引種別（集計用。TxType.isCredit と一致させる） */
     private static final String CREDIT_TYPES = "('DEPOSIT', 'TRANSFER_IN', 'INTEREST')";
 
@@ -34,6 +36,12 @@ public class TransactionRepository {
         final LocalDateTime toExclusive;
         final List<TxType> types;
 
+        /**
+         * @param accountNo   口座番号
+         * @param from        期間の開始（含む。null は条件なし）
+         * @param toExclusive 期間の終了（含まない。null は条件なし）
+         * @param types       取引種別（null・空は全種別）
+         */
         public Filter(String accountNo, LocalDateTime from, LocalDateTime toExclusive, List<TxType> types) {
             this.accountNo = accountNo;
             this.from = from;
@@ -55,6 +63,20 @@ public class TransactionRepository {
         }
     }
 
+    /**
+     * 明細を 1 件登録する（口座ごとのハッシュチェーンを延長する）。
+     *
+     * @param c                     DB 接続（口座行をロック済みのトランザクション）
+     * @param accountNo             口座番号
+     * @param type                  取引種別
+     * @param amount                金額（正の値）
+     * @param balanceAfter          取引後残高
+     * @param counterpartyAccountNo 相手口座（なければ null）
+     * @param memo                  摘要
+     * @param idempotencyKey        操作の冪等キー（監査ログとの対応付けに使う）
+     * @param now                   記帳日時
+     * @throws SQLException DB アクセスに失敗した場合
+     */
     public void insert(Connection c, String accountNo, TxType type, BigDecimal amount, BigDecimal balanceAfter,
                        String counterpartyAccountNo, String memo, String idempotencyKey, LocalDateTime now)
             throws SQLException {
@@ -71,6 +93,7 @@ public class TransactionRepository {
         try (PreparedStatement ps = c.prepareStatement(INSERT)) {
             bind(c, ps, fromAccountNo, TxType.TRANSFER_OUT, amount, fromBalanceAfter, toAccountNo, memo, idempotencyKey, now);
             ps.addBatch();
+            // 出金側と入金側を同じ冪等キーで記録し、2 つの明細が 1 つの振込であることを追跡できるようにする
             bind(c, ps, toAccountNo, TxType.TRANSFER_IN, amount, toBalanceAfter, fromAccountNo, memo, idempotencyKey, now);
             ps.addBatch();
             ps.executeBatch();
@@ -167,6 +190,7 @@ public class TransactionRepository {
         }
     }
 
+    // 指定された条件だけを AND でつなぎ、値はすべてバインド変数として params に追加する
     private static String where(Filter f, List<Object> params) {
         StringBuilder sb = new StringBuilder(" WHERE account_no = ?");
         params.add(f.accountNo);
@@ -189,10 +213,12 @@ public class TransactionRepository {
         return sb.toString();
     }
 
+    // where() で積んだ順にバインド変数を設定する
     private static void bindAll(PreparedStatement ps, List<Object> params) throws SQLException {
         for (int i = 0; i < params.size(); i++) ps.setObject(i + 1, params.get(i));
     }
 
+    // SELECT 結果を AccountTransaction のリストに変換する
     private static List<AccountTransaction> readAll(PreparedStatement ps) throws SQLException {
         try (ResultSet rs = ps.executeQuery()) {
             List<AccountTransaction> list = new ArrayList<>();
@@ -220,7 +246,9 @@ public class TransactionRepository {
                              String idempotencyKey, LocalDateTime time) throws SQLException {
         // Second precision: the hashed timestamp must read back identically from Oracle and H2
         LocalDateTime now = time.withNano(0);
+        // 直前の明細のハッシュを鎖の前方参照にする。過去の明細を書き換えると、それ以降のハッシュがすべて合わなくなる
         String prev = com.example.bank.service.LedgerService.lastHash(c, accountNo);
+        // prev が null（ハッシュ導入前の口座）の場合はチェーンを始めない
         String hash = prev == null ? null : com.example.bank.service.LedgerService.hash(
                 com.example.bank.service.LedgerService.canonical(accountNo, type.name(), amount, balanceAfter,
                         counterpartyAccountNo, memo, idempotencyKey, now.toString(), prev));

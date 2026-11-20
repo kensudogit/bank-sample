@@ -18,13 +18,16 @@ public class InterestAction extends BaseApiAction {
     private String asOf;
     private LocalDate asOfDate;
 
+    /** Struts が使う既定コンストラクタ。 */
     public InterestAction() { this(InterestService.getDefault()); }
 
+    /** @param interest 利息サービス（テスト用） */
     public InterestAction(InterestService interest) {
         super(BankService.getDefault());
         this.interest = interest;
     }
 
+    /** 口座番号（任意）と基準日（任意）の形式を検証する。 */
     @Override
     public void validate() {
         accountNo = InputRules.emptyToNull(accountNo);
@@ -37,6 +40,11 @@ public class InterestAction extends BaseApiAction {
         }
     }
 
+    /**
+     * 利息・税の見込みを計算する（口座には入金しない）。
+     *
+     * @return success、口座番号がなければ input
+     */
     public String preview() {
         if (accountNo == null) {
             addFieldError("accountNo", getText("validation.accountNo"));
@@ -50,6 +58,11 @@ public class InterestAction extends BaseApiAction {
         }
     }
 
+    /**
+     * 利息を決算して口座に入金する。口座番号を省略すると全口座が対象。
+     *
+     * @return success、または業務エラーの結果名
+     */
     public String settle() {
         try {
             return ok(accountNo == null ? interest.settleAll(asOfDate) : interest.settle(accountNo, asOfDate));
@@ -58,9 +71,12 @@ public class InterestAction extends BaseApiAction {
         }
     }
 
+    /** @return 監査ログの対象（口座番号または ALL と基準日） */
     @Override
     public String getAuditTarget() { return (accountNo == null ? "ALL" : accountNo) + (asOf == null ? "" : " asOf=" + asOf); }
 
+    /** @param accountNo 口座番号（任意） */
     @StrutsParameter public void setAccountNo(String accountNo) { this.accountNo = accountNo; }
+    /** @param asOf 基準日（yyyy-MM-dd、任意） */
     @StrutsParameter public void setAsOf(String asOf) { this.asOf = asOf; }
 }

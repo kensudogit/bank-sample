@@ -9,17 +9,17 @@
 | API | Apache Struts 2.6 系（6.13.0）+ struts2-json-plugin、JDBC |
 | ビルド | **Gradle 8.14.3**（Wrapper 同梱、Java 8 向けにコンパイル） |
 | データベース | **Oracle Database 23ai Free**（gvenzl/oracle-free、PDB `FREEPDB1`、スキーマ `BANK`） |
-| 実行環境 | Docker Compose（oracle / liberty / frontend の 3 コンテナ） |
+| 実行環境 | Docker Compose（oracle / liberty ×2 / frontend ×2 / lb（nginx）） |
 
 ```text
-ブラウザ ──▶ frontend (Next.js :3000)
-               │  /api/bank/*  を同一オリジンでプロキシ（CORS 不要）
-               ▼
-            liberty (WebSphere Liberty :9080, /bank/api/*)
-               │  Struts 2 Action → BankService → JDBC
-               │  接続プールは Liberty 管理の JNDI DataSource  jdbc/bankDS
-               ▼
-            oracle (Oracle 23ai Free :1521 / FREEPDB1)
+ブラウザ ──▶ lb (nginx :3000) ──▶ frontend ×2 (Next.js)
+                                    │  /api/bank/*  を同一オリジンでプロキシ（CORS 不要）
+                                    ▼
+             lb (nginx :9080) ──▶ liberty ×2 (WebSphere Liberty, /bank/api/*)
+                                    │  Struts 2 Action → Service → JDBC（JNDI DataSource jdbc/bankDS）
+                                    │  ログインセッションも Oracle に保存（どのインスタンスでも継続）
+                                    ▼
+                                 oracle (Oracle 23ai Free :1521 / FREEPDB1)
 ```
 
 ## 起動
@@ -67,6 +67,12 @@ docker compose exec oracle bash -c "sqlplus -s / as sysdba @/container-entrypoin
 ```bash
 docker compose exec oracle bash -c "sqlplus -s / as sysdba @/container-entrypoint-initdb.d/05_banking.sql"
 ```
+
+```bash
+docker compose exec oracle bash -c "sqlplus -s / as sysdba @/container-entrypoint-initdb.d/06_reliability.sql"
+```
+
+以前の構成（liberty・frontend が直接ポートを公開）から更新する場合は、`docker compose up -d --build --remove-orphans` でロードバランサー構成に置き換わります。
 
 ### ロゴ
 
@@ -208,7 +214,7 @@ Windows でスクリプトや curl から呼ぶ場合は `localhost` ではな�
 ### 夜間バッチ
 
 - Liberty 内で 10 分ごとに確認し、毎日 01:00 以降に実行（`BANK_JOBS_ENABLED=true`、compose の既定は有効）。
-- 休眠管理・定期預金の満期処理・融資の約定返済と延滞判定・口座振替（毎日）、古い冪等キーの削除（90 日超・毎日）、利息決算（3/1・9/1 に 2 月末・8 月末までを決算）、AML の取引モニタリング（10 分ごと）。
+- 休眠管理・定期預金の満期処理・融資の約定返済と延滞判定・口座振替（毎日）、取引元帳の整合性検証（毎日・不整合があればジョブ失敗として記録）、古い冪等キーの削除（90 日超・毎日）、利息決算（3/1・9/1 に 2 月末・8 月末までを決算）、AML の取引モニタリング（10 分ごと）。
 - 実行権は `JOB_RUN` の主キー（ジョブ名 + 業務日）で取得するため、再起動や複数インスタンスでも 1 日 1 回。失敗したジョブはその日は再実行されないため、業務処理画面の結果を確認し、必要なら各処理を手動で実行してください。
 
 ### 預金商品
@@ -234,7 +240,8 @@ Windows でスクリプトや curl から呼ぶ場合は `localhost` ではな�
 ### 為替
 
 - 振込（当行あて）・振替（本人口座間）は `/transfer`。他行宛振込は手数料 330 円（3 万円未満）／440 円、15:00 以降・休業日は翌営業日扱い。全銀データ作成で総合振込フォーマット（ヘッダー・データ・トレーラー・エンド、各 120 バイト・半角カナ）を作り送信済みに、決済完了で決済済み。送信前は取消（手数料も返金）、送信後は組戻し（手数料は返金しない）。
-- 被仕向（他行からの振込）は口座番号と受取人名（カナを正規化して照合）が一致すれば入金、不一致は保留して役席が入金か返却を判断。
+- 被仕向（他行からの振込）は口座番号と受取人名（カナを正規化して照合）が一致すれば入金、不一致は保留して役席が入金か返却を判断。仕向銀行コード + 照会番号で一意にし、同じ振込データを再取込しても二重入金しません（結果は「重複」）。
+- 口座振替の請求データは「契約 + 引落日」で一意。同じ請求ファイルの再取込は「重複（取込済み）」になります。
 - 口座振替: 収納企業・お客さま番号ごとの契約、請求データの取込、引落日の処理（結果コード 0 振替済 / 1 資金不足 / 2 取引なし）。
 - 海外送金: 円口座（TTS 換算）または同じ通貨の外貨預金から。手数料 4,000 円。受取人名を制裁リストと照合（語順・綴りの揺れを吸収する類似度 0.85 以上）、高リスク国も保留して役席が送金または謝絶（全額返金）。送金時は SWIFT MT103 形式の電文を作成。
 
@@ -252,13 +259,52 @@ Windows でスクリプトや curl から呼ぶ場合は `localhost` ではな�
 - 残高は `NUMBER(15,0)` + `CHECK (balance >= 0)`、明細は取引ごとに取引後残高を保持。
 - 凍結・解約口座は取引不可。
 
+## 信頼性・整合性・高可用性
+
+### ACID トランザクション
+
+- 1 操作 = 1 DB トランザクション（`Transactions.inTransaction`）。途中で失敗すれば口座残高・明細・冪等キー・関連表のすべてがロールバックされます。
+- 一時的な DB エラー（接続断・フェイルオーバー、デッドロック ORA-00060、直列化エラー ORA-08177 など）は**コミット前に限り**最大 3 回まで自動で再試行（50・200 ms 待機）。コミット中の障害は結果が不明なため再試行せず、エラーを返します（同じ冪等キーで再送すれば、実行済みなら前回の結果、未実行なら新たに処理）。
+- 読取り一貫性は Oracle の READ COMMITTED（文レベルの読取り一貫性）、更新は行ロックで直列化します。
+
+### 排他制御
+
+- 残高を変えるすべての処理（入出金・振込・利息・解約・融資・口座振替・被仕向・両替など）が、更新前に口座行を `SELECT ... FOR UPDATE` でロックし、ロック後の残高で検証します。複数口座は口座番号順にロックしてデッドロックを防ぎます。
+- 日次上限の集計も口座行ロック中に行うため、同時実行でも上限を超えません。
+- 検証: 同じ口座への 20 件同時出金で残高を超える出金が 1 件も成立しないこと、双方向 80 件の並行振込で 2 口座の合計が保存されることをテスト・実環境で確認。
+
+### 二重処理防止（冪等性）
+
+- すべての更新 API は `idempotencyKey`（画面は操作ごとに UUID を自動付与）が必須。キーは `OPERATION_REQUEST` の主キーで、同じキーの同時送信も 1 件だけが実行されます。
+- 実行済みのキーで再送されると、**前回の処理結果をそのまま返します**（応答に `"replayed": true`、監査ログの詳細は `REPLAYED`）。通信断で結果を受け取れなかった画面・ロードバランサーの再送でも、残高は 1 回分しか動きません。
+- 同じキーで内容の違う依頼は `IDEMPOTENCY_KEY_REUSED`（422）、先の処理が実行中なら `REQUEST_IN_PROGRESS`（409）。
+- 外部から届くファイルも二重取込を防止: 被仕向振込は「仕向銀行コード + 照会番号」、口座振替の請求は「契約 + 引落日」で一意。
+
+### 高可用性
+
+- `lb`（nginx）の背後に API（Liberty）2 台・画面（Next.js）2 台。停止・異常のインスタンスは自動で外され、接続エラー・タイムアウト・502/503/504 は**もう一方のインスタンスへ再送**されます（POST も再送。冪等キーにより二重実行にならない）。
+- ログインセッションは Oracle（`BANK_HTTP_SESSIONS`、Liberty `sessionDatabase-1.0`）に保存するため、片方の停止・再起動・ローリング更新でもログアウトされません。
+- ヘルスチェック: `/bank/api/health`（DB に接続できなければ 503 = ロードバランサーから外れる）、`/bank/api/live`（プロセスの生存。応答にインスタンス名）。
+- 夜間バッチは各ジョブを `JOB_RUN` の主キーで取得するため、複数インスタンスでも 1 日 1 回。
+- 台数は `.env` の `LIBERTY_REPLICAS` / `FRONTEND_REPLICAS`（3 台以上にする場合は `lb/nginx.conf` の `server` 行も追加）。
+- 検証: 操作中に API インスタンスを 1 台停止しても約 450 件の要求がすべて成功、ログイン状態も継続。停止したインスタンスは再起動後に自動で復帰。画面インスタンスの停止でも要求は失敗しません。
+- 範囲外: Oracle は 1 台（単一障害点）。本番では Data Guard（スタンバイ切替）や RAC、定期バックアップ（RMAN）と復旧手順が必要です。Liberty の接続プールは DB 再起動後に接続を作り直し、一時エラーは上記の再試行で吸収します。
+
+### 監査証跡
+
+- **操作履歴**: 監査ログ（誰が・いつ・どこから・何を・結果）。行ごとに SHA-256 のハッシュチェーンでつなぎ、`/audit-verify` で書換え・削除を検出。利用者 IP はロードバランサーが付ける `X-Forwarded-For` から記録します。
+- **取引履歴**: 取引明細も口座ごとにハッシュチェーン（明細登録時、口座行のロック中に直前の明細のハッシュを含めて計算）。この機能より前の明細は最初の検証時にハッシュを付けます。
+- **元帳の検証**（`/ledger-verify`、監査ログ画面の「元帳を検証」、夜間バッチ `LEDGER_CHECK`）: ハッシュチェーン、残高の連続性（直前残高 ± 金額 = 取引後残高）、口座残高と最新明細の一致、振込の出金・入金の対応。
+- **取引の追跡**（`/ledger-trace`、行員の口座詳細画面「取引の追跡」）: 明細と、それを実行した操作（監査ログ）を冪等キーで結び付け、取引ごとに操作者・時刻・IP を表示。夜間バッチ等のシステム処理はその旨を表示します。
+
 ## ディレクトリ
 
 ```text
 bank-sample/
-├─ docker-compose.yml        oracle / liberty / frontend
+├─ docker-compose.yml        oracle / liberty ×2 / frontend ×2 / lb
+├─ lb/nginx.conf             ロードバランサー（再送・ヘルスチェック）
 ├─ .env.example              パスワード等（.env にコピー）
-├─ db/init/                  01_schema.sql（DDL）, 02_seed.sql（サンプルデータ）, 03_lifecycle.sql（KYC・利息・休眠）, 04_security.sql（利用者・監査ログ・バッチ）, 05_banking.sql（預金商品・融資・為替・AML・CRM）
+├─ db/init/                  01_schema.sql（DDL）, 02_seed.sql（サンプルデータ）, 03_lifecycle.sql（KYC・利息・休眠）, 04_security.sql（利用者・監査ログ・バッチ）, 05_banking.sql（預金商品・融資・為替・AML・CRM）, 06_reliability.sql（冪等応答・元帳ハッシュ・重複取込防止）
 ├─ backend/                  Gradle プロジェクト（bank-api.war）
 │  ├─ build.gradle, gradlew  Struts 2 / json-plugin / ojdbc8（Liberty 共有ライブラリへ配置）
 │  ├─ Dockerfile             Gradle ビルド → WebSphere Liberty (kernel-java8-openj9-ubi-minimal)
@@ -297,12 +343,13 @@ cd frontend && npm install && npm run dev
 
 ## 本番化に向けて未実装・要対応
 
-実装済み: ログイン・セッション・役割別の権限・本人口座の限定、職務分離、監査ログ（改ざん検知）、日次上限、夜間バッチ、冪等キーの整理、口座一覧のページング。以下は外部の基盤・契約・運用が必要なため未対応です。
+実装済み: ログイン・セッション・役割別の権限・本人口座の限定、職務分離、監査ログ（改ざん検知）、取引元帳の検証と追跡、日次上限、夜間バッチ、冪等キーの整理と応答の再送、API・画面の冗長化、口座一覧のページング。以下は外部の基盤・契約・運用が必要なため未対応です。
 
 - HTTPS（Liberty `ssl-1.0` / リバースプロキシ）。HTTPS 化したら `server.xml` の `cookieSecure="true"` に変更
 - 秘密情報の外部管理（Vault 等）、デモユーザーの削除と初期パスワード運用
 - 多要素認証（ワンタイムパスワード・認証アプリ）、行員の SSO（Microsoft Entra ID 等）、操作の二重承認（申請→承認のワークフロー）
-- 監査ログの利用者 IP: Next.js の rewrites 経由では利用者の IP が Liberty に渡らずフロントエンドコンテナの IP になる。リバースプロキシで `X-Forwarded-For` を付与し、信頼できるプロキシからの値だけを採用する
+- 監査ログの利用者 IP: 現在は `X-Forwarded-For` の値を記録。インターネットに公開する場合は、信頼できるプロキシが付けた値だけを採用する設定にする
+- データベースの冗長化（Oracle Data Guard / RAC）、バックアップ（RMAN）と復旧訓練、データセンター障害への備え
 - 監査ログの WORM 保管（外部ストレージへの定期転送）、SIEM 連携
 - 本人確認: 犯罪収益移転防止法に沿った eKYC・書類画像の保管・取引時確認の記録、反社チェック
 - 営業日カレンダーの年次更新（`HOLIDAY` 表は 2026〜2027 年の一部のみ）・締め処理、外部勘定系・全銀システムとの実接続（現在はファイル作成まで）、休眠預金の預金保険機構への移管

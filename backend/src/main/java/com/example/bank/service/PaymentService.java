@@ -48,9 +48,13 @@ import static com.example.bank.repository.ProductRepository.query;
  * </ul>
  */
 public class PaymentService {
+    /** 当行の金融機関コード（全銀データのヘッダーに使う） */
     public static final String OUR_BANK_CODE = "9999";
+    /** 他行宛振込の当日扱いの締め時刻 */
     public static final LocalTime CUTOFF = LocalTime.of(15, 0);
+    /** 海外送金の手数料（円） */
     public static final BigDecimal FOREIGN_FEE = new BigDecimal("4000");
+    // 海外送金の電文に載せる項目は SWIFT で使える文字・形式に限る（不正な文字で電文が壊れないように）
     private static final Pattern BIC = Pattern.compile("^[A-Z]{6}[A-Z0-9]{2}([A-Z0-9]{3})?$");
     private static final Pattern IBAN_OR_ACCOUNT = Pattern.compile("^[A-Z0-9]{5,34}$");
     private static final Pattern SWIFT_TEXT = Pattern.compile("^[A-Z0-9 .,()/'+:?-]{1,70}$");
@@ -66,12 +70,17 @@ public class PaymentService {
     private final ProductRepository products = new ProductRepository();
     private final AmlService aml;
 
+    /**
+     * @param dataSource 接続の取得元
+     * @param clock      締め時刻・振込指定日の判定に使う時計
+     */
     public PaymentService(Supplier<DataSource> dataSource, Clock clock) {
         this.dataSource = dataSource;
         this.clock = clock;
         this.aml = new AmlService(dataSource, clock);
     }
 
+    /** @return アプリケーション既定のインスタンス */
     public static PaymentService getDefault() { return DEFAULT; }
 
     /** 他行宛振込の手数料。 */
@@ -81,6 +90,11 @@ public class PaymentService {
 
     // ===================== domestic outgoing =====================
 
+    /**
+     * 金融機関の一覧。
+     *
+     * @return 金融機関コード順の一覧
+     */
     public List<Map<String, Object>> banks() {
         return Transactions.readOnly(dataSource.get(), c -> query(c, "SELECT * FROM bank_master ORDER BY bank_code"));
     }
@@ -95,6 +109,7 @@ public class PaymentService {
                                             String idempotencyKey, String by) {
         BankService.checkAmount(amount);
         if (OUR_BANK_CODE.equals(bankCode)) throw new BankException(ErrorCode.VALIDATION_ERROR);   // 当行宛は振込（本支店）で
+        // 受取人名は全銀で使える半角文字に変換してから桁数を確かめる（濁点が 2 文字になるため変換後で数える）
         String nameZ = Kana.toZengin(destNameKana).trim();
         if (nameZ.isEmpty() || nameZ.length() > 30) throw new BankException(ErrorCode.VALIDATION_ERROR);
         return Transactions.inTransaction(dataSource.get(), c -> {
@@ -106,6 +121,7 @@ public class PaymentService {
             Account from = BankService.lockActive(c, accounts, fromAccountNo);
             BankService.requireYenTransactional(from);
             BigDecimal fee = domesticFee(amount);
+            // 振込金と手数料を別々に引き当て、どちらの時点でも引出可能額を超えないことを確かめる
             BigDecimal afterAmount = BankService.debit(from, amount);
             Account interim = withBalance(from, afterAmount);
             BigDecimal afterFee = BankService.debit(interim, fee);
@@ -117,6 +133,7 @@ public class PaymentService {
                     + "created_by, created_at) VALUES ('OUT', ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', ?, ?, ?, ?)", "remit_id",
                     fromAccountNo, bankCode, branchCode, destType, destAccountNo, nameZ, amount, fee, valueDate,
                     idempotencyKey, by, now);
+            // 資金は受付時に引き落とし、全銀データ作成まで PENDING で保持する（送信前なら取消しで返金できる）
             accounts.updateBalance(c, fromAccountNo, afterFee, now, true);
             transactions.insert(c, fromAccountNo, TxType.REMIT_OUT, amount, afterAmount, null,
                     "他行振込 " + bankCode + "-" + branchCode + " " + nameZ, idempotencyKey, now);
@@ -136,6 +153,7 @@ public class PaymentService {
     public Map<String, Object> cancelDomestic(long remitId, String by) {
         return Transactions.inTransaction(dataSource.get(), c -> {
             LocalDateTime now = LocalDateTime.now(clock);
+            // 送金行をロックしてから状態を確かめ、全銀データ作成（PENDING → SENT）と取消しが同時に成立しないようにする
             Map<String, Object> r = lockRemittance(c, remitId);
             if (!"OUT".equals(r.get("direction")) || !"PENDING".equals(r.get("status"))) {
                 throw new BankException(ErrorCode.REMITTANCE_STATE_INVALID, String.valueOf(r.get("status")));
@@ -163,6 +181,7 @@ public class PaymentService {
         });
     }
 
+    // 返金は顧客の操作ではないので最終異動日を更新しない（customerActivity = false）
     private void refund(Connection c, String accountNo, BigDecimal amount, String memo, LocalDateTime now) throws SQLException {
         Account account = BankService.lockExisting(c, accounts, accountNo);
         if ("CLOSED".equals(account.getStatus())) throw new BankException(ErrorCode.ACCOUNT_NOT_ACTIVE, accountNo);
@@ -179,6 +198,7 @@ public class PaymentService {
         return Transactions.inTransaction(dataSource.get(), c -> {
             LocalDateTime now = LocalDateTime.now(clock);
             LocalDate today = now.toLocalDate();
+            // 対象行を先にロックしてから結合して読む。結合した SELECT に FOR UPDATE を付けると、マスター表の行までロックしてしまうため
             // Lock the target rows first (single table), then read them with the bank names
             List<Map<String, Object>> locked = query(c, "SELECT remit_id FROM domestic_remittance WHERE direction = 'OUT' "
                     + "AND status = 'PENDING' AND value_date <= ? ORDER BY remit_id FOR UPDATE", today);
@@ -187,12 +207,14 @@ public class PaymentService {
                 rows.add(query(c, "SELECT r.*, b.name_kana AS bank_name_kana FROM domestic_remittance r "
                         + "JOIN bank_master b ON b.bank_code = r.bank_code WHERE r.remit_id = ?", l.get("remitId")).get(0));
             }
+            // 対象がなければ空のファイルを作らずにエラーにする
             if (rows.isEmpty()) throw new BankException(ErrorCode.REMITTANCE_STATE_INVALID, "送信対象なし");
             String content = zenginFile(rows, today);
             long total = 0;
             for (Map<String, Object> r : rows) total += LoanService.num(r.get("amount")).longValue();
             long batchId = insertReturningId(c, "INSERT INTO zengin_batch (value_date, record_count, total_amount, content, "
                     + "created_by, created_at) VALUES (?, ?, ?, ?, ?, ?)", "batch_id", today, rows.size(), total, content, by, now);
+            // ファイル作成と状態更新を同じトランザクションで行い、ファイルに載った振込だけが SENT になるようにする
             for (Map<String, Object> r : rows) {
                 execute(c, "UPDATE domestic_remittance SET status = 'SENT', batch_id = ? WHERE remit_id = ?", batchId, r.get("remitId"));
             }
@@ -203,6 +225,7 @@ public class PaymentService {
     /** 全銀フォーマット（総合振込）のファイル内容。 */
     public static String zenginFile(List<Map<String, Object>> rows, LocalDate tradeDate) {
         StringBuilder sb = new StringBuilder();
+        // 各レコードは固定長（120 文字）。padRight / padNumber で桁をそろえ、1 文字でもずれると受け付けられない
         String mmdd = tradeDate.format(DateTimeFormatter.ofPattern("MMdd"));
         // Header: data kind 1, kind code 21 (総合振込), code 0, requester code, name, date, our bank/branch/account
         sb.append('1').append("21").append('0').append(Kana.padNumber(1, 10))
@@ -229,6 +252,7 @@ public class PaymentService {
     /** 全銀センターからの決済完了の反映（送信済み → 決済済み）。 */
     public Map<String, Object> settleBatch(long batchId) {
         return Transactions.inTransaction(dataSource.get(), c -> {
+            // status = 'SENT' の条件で、組戻し済みなど別の状態に変わった振込は決済済みにしない
             int n = execute(c, "UPDATE domestic_remittance SET status = 'SETTLED' WHERE batch_id = ? AND status = 'SENT'", batchId);
             Map<String, Object> m = new LinkedHashMap<>();
             m.put("batchId", batchId);
@@ -237,11 +261,23 @@ public class PaymentService {
         });
     }
 
+    /**
+     * 全銀データの作成履歴（新しい順に最大 50 件）。
+     *
+     * @return 作成履歴
+     */
     public List<Map<String, Object>> zenginBatches() {
         return Transactions.readOnly(dataSource.get(), c -> query(c, "SELECT batch_id, value_date, record_count, total_amount, "
                 + "created_by, created_at FROM zengin_batch ORDER BY batch_id DESC FETCH FIRST 50 ROWS ONLY"));
     }
 
+    /**
+     * 全銀データ 1 件（ファイル内容を含む）。
+     *
+     * @param batchId 全銀データの番号
+     * @return 全銀データ
+     * @throws BankException 見つからない場合
+     */
     public Map<String, Object> zenginBatch(long batchId) {
         return Transactions.readOnly(dataSource.get(), c -> {
             List<Map<String, Object>> rows = query(c, "SELECT * FROM zengin_batch WHERE batch_id = ?", batchId);
@@ -256,6 +292,8 @@ public class PaymentService {
     public static final class Incoming {
         public String bankCode;
         public String remitterNameKana;
+        /** 仕向銀行の取引番号（同じ仕向銀行・同じ番号の振込は 1 回だけ入金する） */
+        public String referenceNo;
         public String accountNo;
         public String destType = "1";
         public String nameKana;
@@ -266,11 +304,53 @@ public class PaymentService {
     public List<Map<String, Object>> receiveIncoming(List<Incoming> items, String by) {
         List<Map<String, Object>> results = new ArrayList<>();
         for (Incoming in : items) {
-            results.add(Transactions.inTransaction(dataSource.get(), c -> {
+            try {
+                // 1 件ずつ別トランザクションで入金する（1 件の失敗で他の振込の入金を取り消さない）
+                results.add(receiveOne(in, by));
+            } catch (com.example.bank.support.DataAccessException e) {
+                // The same reference registered concurrently by another request: treat as a duplicate
+                if (!isUniqueViolation(e)) throw e;
+                results.add(duplicate(in));
+            }
+        }
+        return results;
+    }
+
+    // 例外の原因をたどり、一意制約違反（ORA-00001 / SQLState 23xxx）かどうかを判定する
+    private static boolean isUniqueViolation(Throwable e) {
+        for (Throwable t = e; t != null; t = t.getCause()) {
+            if (t instanceof SQLException) {
+                SQLException s = (SQLException) t;
+                if (s.getErrorCode() == 1 || (s.getSQLState() != null && s.getSQLState().startsWith("23"))) return true;
+            }
+        }
+        return false;
+    }
+
+    // 重複として扱った振込の結果（入金はしない）
+    private static Map<String, Object> duplicate(Incoming in) {
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("status", "DUPLICATE");
+        m.put("bankCode", in.bankCode);
+        m.put("externalRef", in.referenceNo);
+        m.put("destAccountNo", in.accountNo);
+        m.put("amount", in.amount);
+        m.put("note", "取込済みの振込（重複）");
+        return m;
+    }
+
+    // 被仕向 1 件の入金。参照番号の重複確認 → 口座・名義の確認 → 記録 → 入金を 1 トランザクションで行う
+    private Map<String, Object> receiveOne(Incoming in, String by) {
+            return Transactions.inTransaction(dataSource.get(), c -> {
                 LocalDateTime now = LocalDateTime.now(clock);
                 if (in.amount == null || in.amount.signum() <= 0 || in.amount.scale() > 0) throw new BankException(ErrorCode.VALIDATION_ERROR);
+                if (in.referenceNo != null && !query(c, "SELECT 1 FROM incoming_reference WHERE bank_code = ? AND external_ref = ?",
+                        in.bankCode, in.referenceNo).isEmpty()) {
+                    return duplicate(in);
+                }
                 String nameZ = Kana.toZengin(in.nameKana).trim();
                 String note = null;
+                // 入金先の口座をロックしてから状態を確かめる。口座がなくても例外にせず保留として記録する
                 Account account = accounts.lockById(c, in.accountNo).orElse(null);
                 if (account == null) note = "口座なし";
                 else if (!account.isActive()) note = "取引不可の口座（" + account.getStatus() + "）";
@@ -278,21 +358,25 @@ public class PaymentService {
                 else {
                     Customer cu = customers.findById(c, account.getCustomerId()).orElse(null);
                     if (cu == null || cu.getNameKana() == null
+                            // 名義は全銀文字に正規化して比較する（空白や記号の有無で不一致にしない）
                             || !Kana.normalizeName(cu.getNameKana()).equals(Kana.normalizeName(in.nameKana))) {
                         note = "受取人名不一致";
                     }
                 }
                 long id = insertReturningId(c, "INSERT INTO domestic_remittance (direction, account_no, bank_code, branch_code, "
                         + "dest_account_type, dest_account_no, dest_name_kana, remitter_name_kana, amount, fee, status, value_date, "
-                        + "note, created_by, created_at) VALUES ('IN', ?, ?, '000', ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)", "remit_id",
-                        account == null ? null : in.accountNo, in.bankCode, in.destType, in.accountNo, nameZ,
+                        + "note, created_by, created_at, external_ref) VALUES ('IN', ?, ?, '000', ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?)",
+                        "remit_id", account == null ? null : in.accountNo, in.bankCode, in.destType, in.accountNo, nameZ,
                         clip(Kana.toZengin(in.remitterNameKana), 40), in.amount, note == null ? "CREDITED" : "HELD",
-                        now.toLocalDate(), note, by, now);
+                        now.toLocalDate(), note, by, now, in.referenceNo);
+                if (in.referenceNo != null) {
+                    // Primary key (bank, reference): a concurrent duplicate fails here and the whole credit is rolled back
+                    execute(c, "INSERT INTO incoming_reference (bank_code, external_ref, remit_id, received_at) VALUES (?, ?, ?, ?)",
+                            in.bankCode, in.referenceNo, id, now);
+                }
                 if (note == null) credit(c, account, in.amount, "振込 " + Kana.toZengin(in.remitterNameKana), now);
                 return remittanceView(c, id);
-            }));
-        }
-        return results;
+            });
     }
 
     /** 保留した被仕向の処理（役席）: 指定口座へ入金するか、仕向銀行へ返却する。 */
@@ -303,6 +387,7 @@ public class PaymentService {
             if (!"IN".equals(r.get("direction")) || !"HELD".equals(r.get("status"))) {
                 throw new BankException(ErrorCode.REMITTANCE_STATE_INVALID, String.valueOf(r.get("status")));
             }
+            // 入金先口座は役席が確認して指定する（元の口座番号の誤りを正す場合など）
             if (credit) {
                 Account account = BankService.lockActive(c, accounts, accountNo);
                 BankService.requireYenTransactional(account);
@@ -317,12 +402,21 @@ public class PaymentService {
         });
     }
 
+    // 被仕向の入金は顧客の口座への資金の動きなので、最終異動日も更新する
     private void credit(Connection c, Account account, BigDecimal amount, String memo, LocalDateTime now) throws SQLException {
         BigDecimal balance = account.getBalance().add(amount);
         accounts.updateBalance(c, account.getAccountNo(), balance, now, true);
         transactions.insert(c, account.getAccountNo(), TxType.REMIT_IN, amount, balance, null, clip(memo, 50), null, now);
     }
 
+    /**
+     * 国内送金の一覧（新しい順に最大 200 件）。
+     *
+     * @param customerScope 顧客ログインなら本人の顧客番号、行員なら null
+     * @param direction     OUT（仕向）/ IN（被仕向）/ null（両方）
+     * @param status        状態での絞り込み（null は全件）
+     * @return 送金一覧
+     */
     public List<Map<String, Object>> listDomestic(String customerScope, String direction, String status) {
         StringBuilder where = new StringBuilder(" WHERE 1 = 1");
         List<Object> params = new ArrayList<>();
@@ -345,11 +439,13 @@ public class PaymentService {
                 + " ORDER BY r.remit_id DESC FETCH FIRST 200 ROWS ONLY", params.toArray()));
     }
 
+    // 送金 1 件を金融機関名付きで返す
     private Map<String, Object> remittanceView(Connection c, long id) throws SQLException {
         return query(c, "SELECT r.*, b.name AS bank_name FROM domestic_remittance r "
                 + "LEFT JOIN bank_master b ON b.bank_code = r.bank_code WHERE r.remit_id = ?", id).get(0);
     }
 
+    // 送金行を FOR UPDATE で取得する（状態遷移を直列化する）
     private static Map<String, Object> lockRemittance(Connection c, long id) throws SQLException {
         List<Map<String, Object>> rows = query(c, "SELECT * FROM domestic_remittance WHERE remit_id = ? FOR UPDATE", id);
         if (rows.isEmpty()) throw new BankException(ErrorCode.REMITTANCE_NOT_FOUND, String.valueOf(id));
@@ -358,10 +454,25 @@ public class PaymentService {
 
     // ===================== direct debit =====================
 
+    /**
+     * 口座振替の収納企業一覧。
+     *
+     * @return 収納企業の一覧
+     */
     public List<Map<String, Object>> billers() {
         return Transactions.readOnly(dataSource.get(), c -> query(c, "SELECT * FROM biller ORDER BY biller_code"));
     }
 
+    /**
+     * 口座振替の契約を登録する。
+     *
+     * @param accountNo   引落し口座
+     * @param billerCode  収納企業コード
+     * @param payerNumber 収納企業側のお客さま番号
+     * @param by          登録した利用者
+     * @return 契約の内容
+     * @throws BankException 口座が引落しに使えない・収納企業がない・同じお客さま番号の契約が既にある場合
+     */
     public Map<String, Object> registerMandate(String accountNo, String billerCode, String payerNumber, String by) {
         return Transactions.inTransaction(dataSource.get(), c -> {
             Account account = BankService.lockActive(c, accounts, accountNo);
@@ -381,8 +492,16 @@ public class PaymentService {
         });
     }
 
+    /**
+     * 口座振替の契約を解約する。
+     *
+     * @param mandateId 契約番号
+     * @return 契約の内容
+     * @throws BankException 有効な契約が見つからない場合
+     */
     public Map<String, Object> cancelMandate(long mandateId) {
         return Transactions.inTransaction(dataSource.get(), c -> {
+            // status = 'ACTIVE' を UPDATE の条件に含め、確認と更新を 1 文で行う（二重解約でも更新は 1 回だけ）
             if (execute(c, "UPDATE direct_debit_mandate SET status = 'CANCELLED', cancelled_at = ? WHERE mandate_id = ? "
                     + "AND status = 'ACTIVE'", LocalDateTime.now(clock), mandateId) != 1) {
                 throw new BankException(ErrorCode.MANDATE_NOT_FOUND, String.valueOf(mandateId));
@@ -391,6 +510,10 @@ public class PaymentService {
         });
     }
 
+    /**
+     * @param mandateId 契約番号
+     * @return 引落し口座の名義人の顧客番号（アクセス権の確認用）
+     */
     public String mandateOwner(long mandateId) {
         return Transactions.readOnly(dataSource.get(), c -> {
             List<Map<String, Object>> rows = query(c, "SELECT a.customer_id FROM direct_debit_mandate m "
@@ -411,6 +534,7 @@ public class PaymentService {
     /** 収納企業からの請求データの取込み。契約のない請求は取り込まずに結果で返す。 */
     public List<Map<String, Object>> importBilling(List<Billing> items) {
         List<Map<String, Object>> results = new ArrayList<>();
+        // 取込は全件を 1 トランザクションで行う（Action 側で件数の上限を設けている）
         Transactions.inTransaction(dataSource.get(), c -> {
             LocalDateTime now = LocalDateTime.now(clock);
             for (Billing b : items) {
@@ -424,6 +548,10 @@ public class PaymentService {
                     r.put("result", "入力不備");
                 } else if (m.isEmpty()) {
                     r.put("result", "契約なし");
+                // 同じ契約・同じ引落日の請求は 1 回だけ取り込む（同じファイルを 2 回取り込んでも二重に引き落とさない）
+                } else if (!query(c, "SELECT 1 FROM direct_debit_request WHERE mandate_id = ? AND due_date = ?",
+                        m.get(0).get("mandateId"), b.dueDate).isEmpty()) {
+                    r.put("result", "重複（取込済み）");
                 } else {
                     long id = insertReturningId(c, "INSERT INTO direct_debit_request (mandate_id, amount, due_date, status, "
                             + "created_at) VALUES (?, ?, ?, 'PENDING', ?)", "request_id", m.get(0).get("mandateId"),
@@ -440,6 +568,7 @@ public class PaymentService {
 
     /** 引落日の到来した請求を処理する（夜間バッチ）。結果コード 0: 振替済 / 1: 資金不足 / 2: 取引なし。 */
     public Map<String, Object> processDirectDebits(LocalDate asOf) {
+        // 対象の一覧だけ先に取り、引落しは 1 件ずつ短いトランザクションで行う
         List<Map<String, Object>> due = Transactions.readOnly(dataSource.get(), c -> query(c,
                 "SELECT request_id FROM direct_debit_request WHERE status = 'PENDING' AND due_date <= ? ORDER BY request_id", asOf));
         int paid = 0;
@@ -448,6 +577,7 @@ public class PaymentService {
             long requestId = LoanService.num(d.get("requestId")).longValue();
             boolean ok = Transactions.inTransaction(dataSource.get(), c -> {
                 LocalDateTime now = LocalDateTime.now(clock);
+                // 請求行をロックしてから状態を読み直す（夜間バッチと手動実行が同時に走っても二重に引き落とさない）
                 query(c, "SELECT request_id FROM direct_debit_request WHERE request_id = ? FOR UPDATE", requestId);
                 Map<String, Object> req = query(c, "SELECT r.*, m.account_no, m.status AS mandate_status, b.name AS biller_name "
                         + "FROM direct_debit_request r JOIN direct_debit_mandate m ON m.mandate_id = r.mandate_id "
@@ -459,6 +589,7 @@ public class PaymentService {
                 String code;
                 if (account == null || !account.isActive() || !"ACTIVE".equals(req.get("mandateStatus"))) {
                     code = "2";
+                // 残高不足のときは一部だけ引き落とさず、全額を振替不能にする（口座振替の一般的な扱い）
                 } else if (account.getBalance().add(account.getOverdraftLimit()).compareTo(amount) < 0) {
                     code = "1";
                 } else {
@@ -482,6 +613,12 @@ public class PaymentService {
         return m;
     }
 
+    /**
+     * 口座振替の契約一覧。
+     *
+     * @param customerScope 顧客ログインなら本人の顧客番号、行員なら null
+     * @return 契約一覧
+     */
     public List<Map<String, Object>> listMandates(String customerScope) {
         String where = customerScope == null ? "" : " WHERE a.customer_id = ?";
         Object[] params = customerScope == null ? new Object[0] : new Object[]{customerScope};
@@ -490,6 +627,12 @@ public class PaymentService {
                 + "JOIN account a ON a.account_no = m.account_no" + where + " ORDER BY m.mandate_id DESC", params));
     }
 
+    /**
+     * 引落し依頼の一覧（新しい順に最大 200 件）。
+     *
+     * @param customerScope 顧客ログインなら本人の顧客番号、行員なら null
+     * @return 引落し依頼の一覧
+     */
     public List<Map<String, Object>> listDebitRequests(String customerScope) {
         String where = customerScope == null ? "" : " WHERE a.customer_id = ?";
         Object[] params = customerScope == null ? new Object[0] : new Object[]{customerScope};
@@ -499,6 +642,7 @@ public class PaymentService {
                 + " ORDER BY r.request_id DESC FETCH FIRST 200 ROWS ONLY", params));
     }
 
+    // 契約 1 件を収納企業名付きで返す
     private static Map<String, Object> mandateView(Connection c, long id) throws SQLException {
         return query(c, "SELECT m.*, b.name AS biller_name FROM direct_debit_mandate m JOIN biller b "
                 + "ON b.biller_code = m.biller_code WHERE m.mandate_id = ?", id).get(0);
@@ -519,7 +663,17 @@ public class PaymentService {
         public String purpose;
     }
 
+    /**
+     * 海外送金を受け付ける。資金と手数料を引き落とし、制裁リスト等に該当すれば保留（HELD）にする。
+     *
+     * @param o              送金内容
+     * @param idempotencyKey 冪等キー
+     * @param by             受け付けた利用者
+     * @return 送金の内容
+     * @throws BankException 入力不正・残高不足・上限超過など
+     */
     public Map<String, Object> sendForeign(ForeignOrder o, String idempotencyKey, String by) {
+        // SWIFT 電文は大文字の英数字が基本なので、検証の前に大文字へそろえる
         String name = upper(o.beneficiaryName);
         String acct = upper(o.beneficiaryAccount).replace(" ", "");
         String bic = upper(o.swiftBic);
@@ -556,6 +710,7 @@ public class PaymentService {
             BigDecimal debit;
             BigDecimal appliedRate = null;
             if ("FOREIGN".equals(source.getAccountType())) {
+                // 外貨預金からは同じ通貨でのみ送金できる（通貨をまたぐ場合は先に両替する）
                 if (!o.currency.equals(source.getCurrency())) throw new BankException(ErrorCode.CURRENCY_MISMATCH, o.accountNo);
                 debit = minor;
             } else {
@@ -573,12 +728,14 @@ public class PaymentService {
             transactions.insert(c, source.getAccountNo(), TxType.REMIT_OUT, debit, sourceBalance, null, clip(memo, 50),
                     idempotencyKey, now);
             Account feeNow = feeAccount == source ? withBalance(source, sourceBalance) : feeAccount;
+            // 手数料口座が送金元と同じなら、送金額を引いた後の残高から手数料を引く
             if (feeAccount != source) feeNow = BankService.lockExisting(c, accounts, feeAccount.getAccountNo());
             BigDecimal feeBalance = BankService.debit(feeNow, FOREIGN_FEE);
             accounts.updateBalance(c, feeAccount.getAccountNo(), feeBalance, now, true);
             transactions.insert(c, feeAccount.getAccountNo(), TxType.FEE, FOREIGN_FEE, feeBalance, null, "海外送金手数料",
                     idempotencyKey, now);
 
+            // 引落しと同じトランザクションで照合し、保留になった場合も資金は引き落としたまま役席の判断を待つ
             AmlService.Screening s = aml.screen(c, name, country);
             String status = s.hit ? "HELD" : "SENT";
             long id = insertReturningId(c, "INSERT INTO foreign_remittance (account_no, currency, amount_minor, debit_amount, rate, "
@@ -604,6 +761,7 @@ public class PaymentService {
     public Map<String, Object> decideForeign(long remitId, boolean release, String note, String by) {
         return Transactions.inTransaction(dataSource.get(), c -> {
             LocalDateTime now = LocalDateTime.now(clock);
+            // 送金行をロックし、2 人の役席が同時に送金と謝絶を判断して両方成立するのを防ぐ
             List<Map<String, Object>> rows = query(c, "SELECT * FROM foreign_remittance WHERE remit_id = ? FOR UPDATE", remitId);
             if (rows.isEmpty()) throw new BankException(ErrorCode.REMITTANCE_NOT_FOUND, String.valueOf(remitId));
             Map<String, Object> r = rows.get(0);
@@ -627,6 +785,7 @@ public class PaymentService {
         });
     }
 
+    // 謝絶時の返金（顧客の操作ではないので最終異動日は更新しない）
     private void refundTo(Connection c, String accountNo, BigDecimal amount, String memo, LocalDateTime now) throws SQLException {
         Account account = BankService.lockExisting(c, accounts, accountNo);
         BigDecimal balance = account.getBalance().add(amount);
@@ -639,6 +798,7 @@ public class PaymentService {
                         String purpose, LocalDate valueDate) {
         String amount = DepositMath.fromMinor(minor, currency).toPlainString().replace('.', ',');
         if (!amount.contains(",")) amount = amount + ",";
+        // 8 桁の BIC は支店コード XXX（本店）を補って 11 桁にする
         String bic11 = bic.length() == 8 ? bic + "XXX" : bic;
         return "{1:F01EIGOJPJTAXXX0000000000}{2:I103" + bic11 + "N}{4:\r\n"
                 + ":20:FR" + Kana.padNumber(id, 14) + "\r\n"
@@ -651,6 +811,13 @@ public class PaymentService {
                 + ":71A:SHA\r\n-}";
     }
 
+    /**
+     * 海外送金の一覧（新しい順に最大 200 件）。
+     *
+     * @param customerScope 顧客ログインなら本人の顧客番号、行員なら null
+     * @param status        状態での絞り込み（null は全件）
+     * @return 送金一覧
+     */
     public List<Map<String, Object>> listForeign(String customerScope, String status) {
         StringBuilder where = new StringBuilder(" WHERE 1 = 1");
         List<Object> params = new ArrayList<>();
@@ -668,10 +835,18 @@ public class PaymentService {
                 + where + " ORDER BY f.remit_id DESC FETCH FIRST 200 ROWS ONLY", params.toArray()));
     }
 
+    /**
+     * 海外送金の詳細。
+     *
+     * @param remitId 送金番号
+     * @return 送金の内容（顧客番号を含む）
+     * @throws BankException 見つからない場合
+     */
     public Map<String, Object> getForeign(long remitId) {
         return Transactions.readOnly(dataSource.get(), c -> foreignView(c, remitId));
     }
 
+    // 海外送金 1 件を名義人の顧客番号付きで返す
     private static Map<String, Object> foreignView(Connection c, long id) throws SQLException {
         List<Map<String, Object>> rows = query(c, "SELECT f.*, a.customer_id FROM foreign_remittance f "
                 + "JOIN account a ON a.account_no = f.account_no WHERE f.remit_id = ?", id);
@@ -681,16 +856,19 @@ public class PaymentService {
 
     // ===================== helpers =====================
 
+    // 残高だけを差し替えた Account を作る（振込金を引いた後の残高で手数料の引当てを確かめるため。DB は更新しない）
     private static Account withBalance(Account a, BigDecimal balance) {
         return new Account(a.getAccountNo(), a.getCustomerId(), a.getCustomerName(), a.getAccountType(), balance,
                 a.getStatus(), a.getUpdatedAt(), a.getOpenedAt(), a.getClosedAt(), a.getLastActivityAt(),
                 a.getDormancyNotifiedAt(), a.getDormantAt(), a.getCurrency(), a.getOverdraftLimit());
     }
 
+    // null を空文字にして前後の空白を除き、ロケールに依存せず大文字にする
     private static String upper(String s) {
         return s == null ? "" : s.trim().toUpperCase(java.util.Locale.ROOT);
     }
 
+    // 列長を超える値を切り詰める
     private static String clip(String s, int max) {
         return s == null || s.length() <= max ? s : s.substring(0, max);
     }

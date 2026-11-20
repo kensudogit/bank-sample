@@ -26,12 +26,13 @@ import static com.example.bank.repository.ProductRepository.query;
  * <ul>
  *   <li>残高の連続性: 明細ごとに「直前の取引後残高 ± 金額 = 取引後残高」（入金系は加算・出金系は減算）</li>
  *   <li>残高照合: 口座の残高 = 最新明細の取引後残高</li>
- *   <li>振込・振替の対応: 同じ冪等キーの TRANSFER_OUT と TRANSFER_IN の金額が一致</li>
+ *   <li>振込・振替の対応: 同じ冪等キーの出金側（TRANSFER_OUT、口座への解約払戻しの CLOSE_PAYOUT）と TRANSFER_IN の金額が一致</li>
  *   <li>ハッシュチェーン: 明細は口座ごとに直前の明細のハッシュを含む SHA-256 でつながる（明細の書換え・削除・差込みを検出）</li>
  * </ul>
  * ハッシュは明細の登録時（口座行をロック中）に計算する。この機能より前の明細は最初の検証時に一度だけハッシュを付ける。
  */
 public class LedgerService {
+    /** ハッシュチェーンの起点（口座の最初の明細の prevHash） */
     public static final String GENESIS = "0000000000000000000000000000000000000000000000000000000000000000";
 
     private static final LedgerService DEFAULT = new LedgerService(DataSources::bank, Clock.systemDefaultZone());
@@ -39,11 +40,16 @@ public class LedgerService {
     private final Supplier<DataSource> dataSource;
     private final Clock clock;
 
+    /**
+     * @param dataSource 接続の取得元
+     * @param clock      検証日時の記録に使う時計
+     */
     public LedgerService(Supplier<DataSource> dataSource, Clock clock) {
         this.dataSource = dataSource;
         this.clock = clock;
     }
 
+    /** @return アプリケーション既定のインスタンス */
     public static LedgerService getDefault() { return DEFAULT; }
 
     /** 明細 1 行のハッシュ対象（区切りは改行、null は空）。 */
@@ -53,15 +59,21 @@ public class LedgerService {
         StringBuilder sb = new StringBuilder();
         for (Object v : new Object[]{accountNo, txType, plain(amount), plain(balanceAfter), counterparty, memo,
                 idempotencyKey, createdAt, prevHash}) {
+            // 区切り文字（改行）をエスケープし、項目の境界をずらしても同じ文字列にならないようにする
             sb.append(v == null ? "" : v.toString().replace("\\", "\\\\").replace("\n", "\\n")).append('\n');
         }
         return sb.toString();
     }
 
+    /**
+     * @param canonical {@link #canonical} で作った正規化文字列
+     * @return SHA-256（16 進小文字）
+     */
     public static String hash(String canonical) {
         return PasswordHasher.sha256Hex(canonical);
     }
 
+    // DB によって 100 と 100.00 のように桁数が違って返っても同じハッシュになるよう、数値表記をそろえる
     private static String plain(BigDecimal v) {
         return v == null ? null : v.stripTrailingZeros().toPlainString();
     }
@@ -69,6 +81,7 @@ public class LedgerService {
     /** 口座の最新明細のハッシュ（なければ起点値）。口座行のロック中に呼ぶこと。 */
     public static String lastHash(Connection c, String accountNo) throws SQLException {
         List<Map<String, Object>> rows = query(c, "SELECT row_hash FROM account_transaction WHERE account_no = ? "
+                // 口座行をロック中に読むので、この「最新」が登録までに別の明細に追い越されることはない（チェーンが分岐しない）
                 + "ORDER BY tx_id DESC FETCH FIRST 1 ROWS ONLY", accountNo);
         if (rows.isEmpty()) return GENESIS;
         Object h = rows.get(0).get("rowHash");
@@ -81,6 +94,7 @@ public class LedgerService {
      * @return 検証結果（問題のある口座と理由の一覧を含む）
      */
     public Map<String, Object> verify(String accountNo) {
+        // 旧明細にハッシュがないと検証できないため、検証の前に付ける（付与済みなら何もしない）
         backfill();
         return Transactions.readOnly(dataSource.get(), c -> {
             List<Map<String, Object>> accounts = accountNo == null
@@ -102,6 +116,7 @@ public class LedgerService {
                     BigDecimal after = LoanService.num(t.get("balanceAfter"));
                     String type = (String) t.get("txType");
                     if (prevBalance != null) {
+                        // 入金系は直前残高に加算、出金系は減算した値が、この明細の取引後残高と一致するはず
                         BigDecimal expected = TxType.valueOf(type).isCredit() ? prevBalance.add(amount) : prevBalance.subtract(amount);
                         if (expected.compareTo(after) != 0) {
                             problems.add(problem(no, txId, "残高の連続性", "直前残高 " + prevBalance + " → 期待 " + expected + "、記録 " + after));
@@ -112,6 +127,7 @@ public class LedgerService {
                     if (!prevHash.equals(t.get("prevHash")) || !h.equals(t.get("rowHash"))) {
                         problems.add(problem(no, txId, "ハッシュチェーン", "明細が改ざん・削除・差込みされた可能性"));
                     }
+                    // 記録されたハッシュで次の行をつなぐ（1 行の改ざんで以降すべてが不一致になるのを避け、問題の行だけを報告する）
                     prevHash = t.get("rowHash") == null ? h : (String) t.get("rowHash");
                     prevBalance = after;
                 }
@@ -121,13 +137,15 @@ public class LedgerService {
                     problems.add(problem(no, null, "残高照合", "口座残高 " + balance + " ≠ 最新明細の取引後残高 " + last));
                 }
             }
-            // Transfers: each key's TRANSFER_OUT total equals its TRANSFER_IN total
-            for (Map<String, Object> m : query(c, "SELECT idempotency_key, "
-                    + "SUM(CASE WHEN tx_type = 'TRANSFER_OUT' THEN amount ELSE 0 END) AS out_amount, "
-                    + "SUM(CASE WHEN tx_type = 'TRANSFER_IN' THEN amount ELSE 0 END) AS in_amount FROM account_transaction "
-                    + "WHERE tx_type IN ('TRANSFER_OUT', 'TRANSFER_IN') AND idempotency_key IS NOT NULL "
-                    + "GROUP BY idempotency_key HAVING SUM(CASE WHEN tx_type = 'TRANSFER_OUT' THEN amount ELSE 0 END) "
-                    + "<> SUM(CASE WHEN tx_type = 'TRANSFER_IN' THEN amount ELSE 0 END)")) {
+            // Transfers: for each key the outgoing side (TRANSFER_OUT, or CLOSE_PAYOUT when a closed account is paid
+            // into another account) equals the incoming side (TRANSFER_IN). A cash closure payout has no pair.
+            String out = "SUM(CASE WHEN tx_type IN ('TRANSFER_OUT', 'CLOSE_PAYOUT') THEN amount ELSE 0 END)";
+            String in = "SUM(CASE WHEN tx_type = 'TRANSFER_IN' THEN amount ELSE 0 END)";
+            for (Map<String, Object> m : query(c, "SELECT idempotency_key, " + out + " AS out_amount, " + in + " AS in_amount "
+                    + "FROM account_transaction WHERE tx_type IN ('TRANSFER_OUT', 'TRANSFER_IN', 'CLOSE_PAYOUT') "
+                    + "AND idempotency_key IS NOT NULL GROUP BY idempotency_key "
+                    + "HAVING SUM(CASE WHEN tx_type IN ('TRANSFER_OUT', 'TRANSFER_IN') THEN 1 ELSE 0 END) > 0 "
+                    + "AND " + out + " <> " + in)) {
                 problems.add(problem(null, null, "振込の対応", "キー " + m.get("idempotencyKey") + ": 出金 " + m.get("outAmount")
                         + " ≠ 入金 " + m.get("inAmount")));
             }
@@ -148,7 +166,9 @@ public class LedgerService {
         int filled = 0;
         for (Map<String, Object> a : accounts) {
             String no = (String) a.get("accountNo");
+            // 口座ごとに別トランザクションにし、ロックを長く持ち続けない（全口座を 1 トランザクションにすると記帳が長時間止まる）
             filled += Transactions.inTransaction(dataSource.get(), c -> {
+                // 記帳処理と同じ口座行ロックを取り、ハッシュを付けている間に新しい明細が割り込んでチェーンが分岐するのを防ぐ
                 query(c, "SELECT account_no FROM account WHERE account_no = ? FOR UPDATE", no);   // same lock as postings
                 int n = 0;
                 String prev = GENESIS;
@@ -179,6 +199,7 @@ public class LedgerService {
         return Transactions.readOnly(dataSource.get(), c -> {
             List<Map<String, Object>> txs = query(c, "SELECT tx_id, tx_type, amount, balance_after, counterparty_account_no, "
                     + "memo, idempotency_key, created_at, row_hash FROM account_transaction WHERE account_no = ? "
+                    // 件数は 1〜200 に丸めた整数なので文字列に埋め込んでも SQL インジェクションにはならない
                     + "ORDER BY tx_id DESC FETCH FIRST " + Math.max(1, Math.min(limit, 200)) + " ROWS ONLY", accountNo);
             for (Map<String, Object> t : txs) {
                 Object key = t.get("idempotencyKey");
@@ -192,6 +213,7 @@ public class LedgerService {
         });
     }
 
+    // 検証で見つかった問題 1 件を表す
     private static Map<String, Object> problem(String accountNo, Long txId, String check, String detail) {
         Map<String, Object> m = new LinkedHashMap<>();
         m.put("accountNo", accountNo);

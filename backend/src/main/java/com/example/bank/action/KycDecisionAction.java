@@ -16,13 +16,16 @@ public class KycDecisionAction extends BaseApiAction {
     private String decision;
     private String note;
 
+    /** Struts が使う既定コンストラクタ。 */
     public KycDecisionAction() { this(CustomerService.getDefault()); }
 
+    /** @param customers 顧客サービス（テスト用） */
     public KycDecisionAction(CustomerService customers) {
         super(BankService.getDefault());
         this.customers = customers;
     }
 
+    /** 顧客番号・判定（VERIFIED / REJECTED）・メモを検証する。 */
     @Override
     public void validate() {
         customerId = InputRules.trim(customerId);
@@ -37,6 +40,11 @@ public class KycDecisionAction extends BaseApiAction {
         if (note != null && !InputRules.isText(note, InputRules.NOTE_MAX)) addFieldError("note", getText("validation.note"));
     }
 
+    /**
+     * 本人確認の判定を記録する（申込を受け付けた行員自身は判定できない: 職務分離）。
+     *
+     * @return success、または業務エラーの結果名
+     */
     @Override
     public String execute() {
         try {
@@ -46,10 +54,14 @@ public class KycDecisionAction extends BaseApiAction {
         }
     }
 
+    /** @return 監査ログの対象（顧客番号と判定） */
     @Override
     public String getAuditTarget() { return customerId + " " + decision; }
 
+    /** @param customerId 顧客番号 */
     @StrutsParameter public void setCustomerId(String customerId) { this.customerId = customerId; }
+    /** @param decision 判定（VERIFIED / REJECTED） */
     @StrutsParameter public void setDecision(String decision) { this.decision = decision; }
+    /** @param note 判定メモ（謝絶時は必須） */
     @StrutsParameter public void setNote(String note) { this.note = note; }
 }

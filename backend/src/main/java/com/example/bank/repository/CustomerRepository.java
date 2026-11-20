@@ -19,10 +19,18 @@ import java.util.Optional;
 /** CUSTOMER（顧客・本人確認）への JDBC アクセス。 */
 public class CustomerRepository {
 
+    // 本人確認書類は種類と下 4 桁しか列がない（全桁はそもそも保存しない設計）
     private static final String SELECT =
             "SELECT customer_id, name, name_kana, birth_date, postal_code, address, phone, id_doc_type, id_doc_last4, "
           + "kyc_status, kyc_decided_at, kyc_note, created_at, registered_by, kyc_decided_by, customer_type FROM customer ";
 
+    /**
+     * 顧客番号をシーケンスで採番する（CU + 4 桁以上の連番）。
+     *
+     * @param c DB 接続
+     * @return 新しい顧客番号
+     * @throws SQLException DB アクセスに失敗した場合
+     */
     public String nextCustomerId(Connection c) throws SQLException {
         try (PreparedStatement ps = c.prepareStatement("SELECT customer_seq.NEXTVAL FROM dual");
              ResultSet rs = ps.executeQuery()) {
@@ -66,6 +74,13 @@ public class CustomerRepository {
         }
     }
 
+    /**
+     * 全顧客を返す。
+     *
+     * @param c DB 接続
+     * @return 顧客一覧
+     * @throws SQLException DB アクセスに失敗した場合
+     */
     public List<Customer> findAll(Connection c) throws SQLException {
         try (PreparedStatement ps = c.prepareStatement(SELECT + "ORDER BY customer_id")) {
             ps.setFetchSize(200);
@@ -77,6 +92,14 @@ public class CustomerRepository {
         }
     }
 
+    /**
+     * 顧客を取得する（ロックしない照会用）。
+     *
+     * @param c          DB 接続
+     * @param customerId 顧客番号
+     * @return 顧客（存在しなければ空）
+     * @throws SQLException DB アクセスに失敗した場合
+     */
     public Optional<Customer> findById(Connection c, String customerId) throws SQLException {
         return one(c, SELECT + "WHERE customer_id = ?", customerId);
     }
@@ -86,6 +109,17 @@ public class CustomerRepository {
         return one(c, SELECT + "WHERE customer_id = ? FOR UPDATE", customerId);
     }
 
+    /**
+     * 本人確認の判定結果を記録する（呼び出し側は lockById で顧客行をロックし、未判定であることを確認済みであること）。
+     *
+     * @param c         DB 接続
+     * @param customerId 顧客番号
+     * @param status    判定（VERIFIED / REJECTED）
+     * @param note      判定メモ
+     * @param decidedBy 判定した行員
+     * @param now       判定日時
+     * @throws SQLException DB アクセスに失敗した場合、または顧客行が更新されなかった場合
+     */
     public void decideKyc(Connection c, String customerId, String status, String note, String decidedBy,
                           LocalDateTime now) throws SQLException {
         try (PreparedStatement ps = c.prepareStatement("UPDATE customer SET kyc_status = ?, kyc_note = ?, "
@@ -99,6 +133,7 @@ public class CustomerRepository {
         }
     }
 
+    // 1 行だけを取得する共通処理（照会用・ロック用の両方で使う）
     private static Optional<Customer> one(Connection c, String sql, String customerId) throws SQLException {
         try (PreparedStatement ps = c.prepareStatement(sql)) {
             ps.setString(1, customerId);
@@ -108,6 +143,7 @@ public class CustomerRepository {
         }
     }
 
+    // ResultSet の現在行を Customer に変換する
     private static Customer map(ResultSet rs) throws SQLException {
         Date birth = rs.getDate("birth_date");
         return new Customer(

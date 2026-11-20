@@ -42,6 +42,17 @@ public class InterestRepository {
         }
     }
 
+    /**
+     * 利息決算の結果を記録する（次回の決算は記録した期間の翌日から計算する）。
+     *
+     * @param c         DB 接続
+     * @param accountNo 口座番号
+     * @param from      計算期間の初日
+     * @param to        計算期間の末日
+     * @param calc      計算結果
+     * @param now       決算日時
+     * @throws SQLException DB アクセスに失敗した場合（同じ期間の二重決算は一意制約で失敗する）
+     */
     public void insertSettlement(Connection c, String accountNo, LocalDate from, LocalDate to, Calculation calc,
                                  LocalDateTime now) throws SQLException {
         String sql = "INSERT INTO interest_settlement (account_no, period_from, period_to, days, balance_days, "

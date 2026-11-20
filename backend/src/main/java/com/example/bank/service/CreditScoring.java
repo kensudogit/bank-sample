@@ -29,6 +29,7 @@ public final class CreditScoring {
     /** 格付ごとのデフォルト確率（PD、信用リスク管理用） */
     public static final Map<String, BigDecimal> PD;
 
+    // 金利表は変更されない前提なので、読み取り専用の Map にして誤って書き換えられないようにする
     static {
         Map<String, BigDecimal> b = new HashMap<>();
         b.put("HOUSING", new BigDecimal("0.900"));
@@ -60,6 +61,7 @@ public final class CreditScoring {
 
     /** 審査の入力。 */
     public static final class Input {
+        // 呼び出し側（LoanService）が項目を埋めて渡す単純な入れ物
         public String product;
         public BigDecimal amount;
         public int termMonths;
@@ -76,6 +78,7 @@ public final class CreditScoring {
 
     /** 審査結果。 */
     public static final class Result {
+        // 審査結果。reasons は審査記録に残す判断理由
         public int score;
         public String grade;
         public BigDecimal dti;
@@ -86,12 +89,20 @@ public final class CreditScoring {
         public final List<String> reasons = new ArrayList<>();
     }
 
+    /**
+     * 審査する（点数・格付・推奨判断・適用金利を求める）。
+     *
+     * @param in 審査の入力
+     * @return 審査結果
+     */
     public static Result evaluate(Input in) {
         Result r = new Result();
+        // 格付は返済比率から決まるので、返済比率の計算には中位（C）の金利を仮に使う（循環を避ける）
         BigDecimal estRate = BASE_RATE.get(in.product).add(SPREAD.get("C"));
         r.annualRepayment = annualRepayment(in, estRate);
         r.dti = in.annualIncome.signum() > 0
                 ? in.existingDebtAnnual.add(r.annualRepayment).divide(in.annualIncome, 4, RoundingMode.HALF_UP)
+                // 年収 0 は返済比率を計算できないため、必ず基準超過になる大きな値にする
                 : new BigDecimal("9.9999");
         boolean secured = "HOUSING".equals(in.product) || in.collateralValue.signum() > 0;
         r.ltv = in.collateralValue.signum() > 0 ? in.amount.divide(in.collateralValue, 4, RoundingMode.HALF_UP) : null;
@@ -116,9 +127,11 @@ public final class CreditScoring {
             score -= 30;
             r.reasons.add("延滞中の融資あり");
         }
+        // 延滞の減点でマイナスにならないよう 0〜100 に収める
         r.score = Math.max(0, Math.min(100, score));
         r.grade = r.score >= 80 ? "A" : r.score >= 65 ? "B" : r.score >= 50 ? "C" : r.score >= 35 ? "D" : "E";
 
+        // 形式要件（法令・社内規程）に反する場合は、点数にかかわらず謝絶にする
         boolean hardFail = false;
         if (dti > 0.40 && !"OVERDRAFT".equals(in.product)) {
             hardFail = true;
@@ -139,6 +152,7 @@ public final class CreditScoring {
         }
         r.recommendation = hardFail || "E".equals(r.grade) ? "DECLINE" : "D".equals(r.grade) ? "REVIEW" : "APPROVE";
         BigDecimal rate = BASE_RATE.get(in.product).add(SPREAD.get(r.grade));
+        // 上限金利を超える約定は法令違反になるため、格付による上乗せ後でも上限で抑える
         if ("CARD".equals(in.product) && rate.compareTo(CARD_RATE_CAP) > 0) rate = CARD_RATE_CAP;
         r.rate = rate;
         return r;
@@ -150,6 +164,7 @@ public final class CreditScoring {
             case "CARD":
                 // 約定返済 = 利用限度額の 3%/月 を想定
                 return in.amount.multiply(new BigDecimal("0.36")).setScale(0, RoundingMode.CEILING);
+            // 当座貸越は極度額を使い切った場合の 1 年分の利息を返済額とみなす
             case "OVERDRAFT":
                 return in.amount.multiply(rate).divide(new BigDecimal("100"), 0, RoundingMode.CEILING);
             default:

@@ -5,7 +5,7 @@ import { RequireRole, roleLabel } from "@/components/AuthProvider";
 import { ErrorBox, Loading, SuccessBox } from "@/components/Feedback";
 import { bankApi, useAuditLog, type AuditQuery } from "@/lib/api";
 import { formatNumber } from "@/lib/format";
-import type { AuditVerification, Role } from "@/lib/types";
+import type { AuditVerification, LedgerVerification, Role } from "@/lib/types";
 
 const PAGE_SIZE = 50;
 
@@ -64,6 +64,8 @@ function AuditLog() {
           </button>
         </div>
       </section>
+
+      <LedgerCheck />
 
       <section className="card">
         <form className="filters" onSubmit={(e) => { e.preventDefault(); setFilter(draft); setPage(1); }}>
@@ -149,5 +151,75 @@ function AuditLog() {
         )}
       </section>
     </>
+  );
+}
+
+/** 取引元帳の整合性検証（明細のハッシュチェーン・残高の連続性・口座残高との照合・振込の対応）。 */
+function LedgerCheck() {
+  const [accountNo, setAccountNo] = useState("");
+  const [running, setRunning] = useState(false);
+  const [result, setResult] = useState<LedgerVerification | null>(null);
+  const [error, setError] = useState<unknown>(null);
+
+  const run = async () => {
+    setRunning(true);
+    setError(null);
+    try {
+      setResult(await bankApi.ledgerVerify(accountNo.trim() || undefined));
+    } catch (err) {
+      setError(err);
+    } finally {
+      setRunning(false);
+    }
+  };
+
+  return (
+    <section className="card">
+      <h2>取引元帳の整合性検証</h2>
+      <p className="section-note">
+        口座ごとの取引明細も SHA-256 のハッシュチェーンでつながっています。明細の改ざん・削除、残高の連続性、
+        口座残高と明細の一致、振込の出金・入金の対応を検証します（夜間バッチでも毎日実行）。
+      </p>
+      <ErrorBox error={error} />
+      {result &&
+        (result.valid ? (
+          <SuccessBox>
+            正常です（{formatNumber(result.accounts)} 口座・{formatNumber(result.transactions)} 明細を検証）。
+          </SuccessBox>
+        ) : (
+          <>
+            <div className="alert alert-error" role="alert">
+              不整合を {formatNumber(result.problems.length)} 件検出しました（{formatNumber(result.accounts)} 口座・
+              {formatNumber(result.transactions)} 明細を検証）。
+            </div>
+            <div className="table-wrap">
+              <table>
+                <thead><tr><th>口座</th><th className="num">取引ID</th><th>検証項目</th><th>内容</th></tr></thead>
+                <tbody>
+                  {result.problems.map((p, i) => (
+                    <tr key={i}>
+                      <td>{p.accountNo}</td>
+                      <td className="num">{p.txId ?? "—"}</td>
+                      <td>{p.check}</td>
+                      <td>{p.detail}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </>
+        ))}
+      <form className="filters" onSubmit={(e) => { e.preventDefault(); void run(); }}>
+        <label>
+          口座番号（空欄で全口座）
+          <input value={accountNo} maxLength={7} inputMode="numeric" onChange={(e) => setAccountNo(e.target.value)} />
+        </label>
+        <div className="actions">
+          <button className="btn btn-secondary btn-small" type="submit" disabled={running}>
+            {running ? "検証中…" : "元帳を検証"}
+          </button>
+        </div>
+      </form>
+    </section>
   );
 }

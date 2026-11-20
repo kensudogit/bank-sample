@@ -36,6 +36,7 @@ class BankingServicesTest {
     private AmlService aml;
     private RiskService risk;
 
+    /** テストごとに新しいインメモリ DB を作り、日時を固定したサービスを用意する。 */
     @BeforeEach
     void setUp() {
         db = TestDatabase.create();
@@ -60,11 +61,13 @@ class BankingServicesTest {
         assertEquals(0, yen(expected).compareTo(a), "expected " + expected + " but was " + actual);
     }
 
+    // 業務例外が期待どおりのエラーコードで発生することを確かめる
     private static void assertError(ErrorCode expected, Executable call) {
         BankException e = assertThrows(BankException.class, call);
         assertEquals(expected, e.getCode());
     }
 
+    // テストの前提を作るため、DB を直接書き換える（残高や日付の調整など）
     private void sql(String statement) throws Exception {
         try (Connection c = db.getConnection(); Statement st = c.createStatement()) {
             st.execute(statement);
@@ -87,15 +90,19 @@ class BankingServicesTest {
 
     // ===================== deposits =====================
 
+    /** 当座預金は法人のみ開設でき、当座貸越の契約がなければマイナスにできない。 */
     @Test
     void checkingAccountsAreCorporateOnly() {
         assertError(ErrorCode.CORPORATE_ONLY, () -> customers.openAccount("CU0001", "CHECKING", "JPY", BigDecimal.ZERO, key()));
+        // サンプルの法人はすでに当座預金を持っている（同じ種別は 1 口座まで）
         // The corporate sample already has a checking account (one per type)
         assertError(ErrorCode.ACCOUNT_TYPE_LIMIT, () -> customers.openAccount("CU9001", "CHECKING", "JPY", BigDecimal.ZERO, key()));
+        // 当座貸越の契約がなければ当座預金の残高はマイナスにできない
         // Without an overdraft line a checking account cannot go negative
         assertError(ErrorCode.INSUFFICIENT_FUNDS, () -> bank.withdraw("2000001", yen(8_500_001), null, key()));
     }
 
+    /** 定期預金の中途解約は普通預金金利で再計算し、元利金を資金口座へ払い戻す。 */
     @Test
     void timeDepositEarlyCancellationUsesOrdinaryRate() {
         Map<String, Object> td = deposits.createTimeDeposit("1000002", yen(1_000_000), 12, "PAYOUT", key());
@@ -118,6 +125,7 @@ class BankingServicesTest {
         assertYen(3_000_437, balance("1000002"));
     }
 
+    /** 定期預金の満期処理: 元利金の払出しと、元利継続（自動継続）。 */
     @Test
     void timeDepositMaturityPayoutAndRollover() {
         String payout = (String) deposits.createTimeDeposit("1000002", yen(1_000_000), 3, "PAYOUT", key()).get("accountNo");
@@ -126,9 +134,11 @@ class BankingServicesTest {
         assertTrue(deposits.processMaturities(LocalDate.of(2027, 2, 19)).isEmpty());   // not due yet
         List<Map<String, Object>> done = deposits.processMaturities(LocalDate.of(2027, 2, 20));
         assertEquals(2, done.size());
+        // 1,000,000 × 0.25% × 92 ÷ 365 = 630 円、税は国税 96 円 + 地方税 31 円
         // 1,000,000 x 0.25% x 92/365 = 630; tax 96 + 31
         assertEquals("CLOSED", bank.getAccount(payout).getStatus());
         assertYen(1_500_000 + 1_000_000 + 630 - 96 - 31, balance("1000002"));
+        // 元利継続: 税引後利息が元本に加わり、次の満期は 3 か月後
         // Rollover: principal grows by the net interest, next maturity 3 months later
         Map<String, Object> rolled = deposits.getTimeDeposit(roll);
         assertEquals("ACTIVE", rolled.get("status"));
@@ -138,6 +148,7 @@ class BankingServicesTest {
         assertTrue(deposits.processMaturities(LocalDate.of(2027, 2, 20)).isEmpty());   // once only
     }
 
+    /** 通知預金: 据置期間と事前の払出し通知が必要で、使った通知は消し込まれる。 */
     @Test
     void noticeDepositNeedsNoticeAndHoldingPeriod() {
         assertError(ErrorCode.MINIMUM_AMOUNT, () -> customers.openAccount("CU0001", "NOTICE", "JPY", yen(49_999), key()));
@@ -154,6 +165,7 @@ class BankingServicesTest {
         assertError(ErrorCode.NOTICE_REQUIRED, () -> bank.withdraw(no, yen(1_000), null, key()));    // notice used up
     }
 
+    /** 外貨預金: 両替（TTS / TTB）と、同一名義・通貨のルール、外貨建ての利息。 */
     @Test
     void foreignCurrencyExchangeAndRules() {
         Account usd = customers.openAccount("CU0001", "FOREIGN", "USD", BigDecimal.ZERO, key());
@@ -172,6 +184,7 @@ class BankingServicesTest {
         assertError(ErrorCode.NOT_OWN_ACCOUNT, () -> deposits.exchange("1000003", usd.getAccountNo(), "1.00", key()));
         assertError(ErrorCode.ACCOUNT_NOT_EMPTY, () -> lifecycle.close(usd.getAccountNo(), null, key()));
 
+        // USD 口座の利息は USD の金利（2.00%）でセント単位に計算される
         // Interest on the USD account at the USD rate (2.00%), in cents
         clock.set(LocalDateTime.of(2027, 11, 20, 10, 0));
         InterestResult r = interest.settle(usd.getAccountNo(), LocalDate.of(2027, 11, 20));
@@ -195,6 +208,7 @@ class BankingServicesTest {
         return a;
     }
 
+    /** 住宅ローンの一連の流れ: 申込 → 審査 → 承認 → 契約 → 実行 → 約定返済 → 延滞 → 返済 → 繰上返済。 */
     @Test
     void housingLoanFullLifecycle() throws Exception {
         long appId = id(loans.apply(housing(), "teller1"), "applicationId");
@@ -216,6 +230,7 @@ class BankingServicesTest {
         Map<String, Object> first = (Map<String, Object>) schedule.get(0);
         assertEquals("2026-12-28", first.get("dueDate"));   // 12/27 is a Sunday -> next business day
 
+        // 返済日に口座から自動で引き落とされる
         // Auto-debit on the due date
         clock.set(LocalDateTime.of(2026, 12, 28, 2, 0));
         Map<String, Object> run = loans.processDue(LocalDate.of(2026, 12, 28));
@@ -224,6 +239,7 @@ class BankingServicesTest {
         assertEquals("ACTIVE", after.get("status"));
         assertTrue(((BigDecimal) after.get("outstanding")).compareTo(yen(30_000_000)) < 0);
 
+        // 口座を空にすると次の返済が延滞になり、90 日以上で要管理先になる
         // Empty the account: the next installments become overdue -> delinquent -> special attention (90+ days)
         sql("UPDATE account SET balance = 0 WHERE account_no = '1000001'");
         clock.set(LocalDateTime.of(2027, 5, 1, 2, 0));
@@ -235,6 +251,7 @@ class BankingServicesTest {
         assertError(ErrorCode.LOAN_RULE_VIOLATION, () -> loans.writeOff(loanId, "回収不能", "supervisor1"));
         loans.addCollectionAction(loanId, "CALL", "本人に電話。来週入金予定", LocalDate.of(2027, 5, 8), "teller1");
 
+        // 期日到来分を全額返済すると、遅延損害金 → 利息 → 元金の順に充当され、延滞が解消する
         // Customer pays everything due: late fees, interest and principal are applied, delinquency clears
         sql("UPDATE account SET balance = 2000000 WHERE account_no = '1000001'");
         BigDecimal dueNow = (BigDecimal) late.get("dueNow");
@@ -244,6 +261,7 @@ class BankingServicesTest {
         assertEquals("NORMAL", cured.get("borrowerClass"));
         assertEquals(1, ((List<?>) cured.get("collectionActions")).size());
 
+        // 一部繰上返済で残りの返済額が減る
         // Partial prepayment reduces the remaining installments
         BigDecimal outstanding = (BigDecimal) cured.get("outstanding");
         loans.prepay(loanId, yen(1_000_000), "teller1", key());
@@ -251,6 +269,7 @@ class BankingServicesTest {
         assertEquals(0, outstanding.subtract(yen(1_000_000)).compareTo((BigDecimal) pre.get("outstanding")));
     }
 
+    /** カードローン: 総量規制（年収の 3 分の 1）、極度額の範囲での借入、日割利息と返済。 */
     @Test
     void cardLoanRevolvingWithTotalVolumeRule() {
         LoanService.Application a = new LoanService.Application();
@@ -281,6 +300,7 @@ class BankingServicesTest {
         assertError(ErrorCode.LOAN_RULE_VIOLATION, () -> loans.decide(appId, true, "", null, "supervisor1"));
     }
 
+    /** 当座貸越: 極度額までマイナス残高にでき、決算で貸越利息を徴収する。 */
     @Test
     void overdraftOnCheckingAccountAndInterest() {
         LoanService.Application a = new LoanService.Application();
@@ -303,6 +323,7 @@ class BankingServicesTest {
         assertTrue(balance("2000001").compareTo(yen(-1_000_000)) < 0);
     }
 
+    /** シンジケートローンは参加行の合計が組成総額、当行分が申込額と一致しないと契約できない。 */
     @Test
     void syndicatedLoanNeedsMatchingParticipants() {
         LoanService.Application a = new LoanService.Application();
@@ -338,6 +359,7 @@ class BankingServicesTest {
 
     // ===================== payments =====================
 
+    /** 他行宛振込: 手数料、締め時刻と振込指定日、全銀データ作成、決済、組戻し。 */
     @Test
     void domesticRemittanceZenginAndReturn() {
         Map<String, Object> r = payments.sendDomestic("1000001", "0005", "123", "1", "7654321", "スズキ イチロウ",
@@ -352,6 +374,7 @@ class BankingServicesTest {
         assertError(ErrorCode.BANK_NOT_FOUND, () -> payments.sendDomestic("1000001", "1234", "001", "1", "1111111", "タナカ",
                 yen(1_000), key(), "yamada"));
 
+        // 15:00 以降の受付は翌営業日扱い（11/23 は祝日なので 11/24）
         // After the 15:00 cut-off: next business day (Mon 11/23 is a holiday -> Tue 11/24)
         clock.set(LocalDateTime.of(2026, 11, 20, 15, 30));
         Map<String, Object> late = payments.sendDomestic("1000001", "0009", "200", "1", "2222222", "ヤマダ",
@@ -371,6 +394,7 @@ class BankingServicesTest {
         assertYen(1_250_000 - 440 - 1_330, balance("1000001"));          // pending: amount + fee refunded
     }
 
+    /** 被仕向: 名義が一致すれば入金、不一致は保留し、役席が入金または返却を判断する。 */
     @Test
     void incomingRemittanceMatchesNameOrIsHeld() {
         PaymentService.Incoming ok = new PaymentService.Incoming();
@@ -393,6 +417,7 @@ class BankingServicesTest {
         assertYen(630_000, balance("1000003"));
     }
 
+    /** 口座振替: 契約登録、請求データの取込、引落し（残高不足は振替不能）。 */
     @Test
     void directDebitMandateBillingAndProcessing() {
         long mandate = id(payments.registerMandate("1000004", "ELEC01", "E-0001", "teller1"), "mandateId");
@@ -420,6 +445,7 @@ class BankingServicesTest {
         return b;
     }
 
+    /** 海外送金: 制裁リスト・高リスク国の照合で保留し、役席の判断で送金または謝絶（返金）する。 */
     @Test
     void foreignRemittanceScreeningAndHold() {
         PaymentService.ForeignOrder o = new PaymentService.ForeignOrder();
@@ -457,6 +483,7 @@ class BankingServicesTest {
 
     // ===================== AML / risk / CRM =====================
 
+    /** AML の取引モニタリング（大口現金・分割入金・短期間の資金移動）とアラートの重複防止。 */
     @Test
     void amlTransactionMonitoring() {
         bank.deposit("1000001", yen(2_500_000), "現金", key());                          // LARGE_CASH
@@ -476,6 +503,7 @@ class BankingServicesTest {
         assertEquals("REPORTED", aml.updateAlert(alertId, "REPORTED", "疑わしい取引の届出を提出", "supervisor1").get("status"));
     }
 
+    /** リスク管理ダッシュボードと顧客 360° の集計。 */
     @Test
     void riskDashboardAndCustomer360() {
         grant(housing(), "1000001", appId ->

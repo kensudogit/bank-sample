@@ -49,17 +49,27 @@ public class AuditRepository {
         return append(c, at, userId, role, action, target, outcome, detail, clientIp, null);
     }
 
+    /**
+     * 冪等キー付きで 1 行追記する。
+     *
+     * @param requestKey 操作の冪等キー（明細との対応付けに使う。なければ null）
+     * @return 追記した行
+     * 他の引数は 9 引数版の append と同じ。
+     */
     public AuditEntry append(Connection c, LocalDateTime at, String userId, String role, String action, String target,
                              String outcome, String detail, String clientIp, String requestKey) throws SQLException {
         long lastId;
         String lastHash;
         try (PreparedStatement ps = c.prepareStatement(
+                // チェーンの先頭（最終 ID と最終ハッシュ）を 1 行で管理し、FOR UPDATE で直列化する。
+                // 同時に 2 件追記されても、同じ prevHash を持つ行が 2 つできて鎖が分岐することはない
                 "SELECT last_id, last_hash FROM audit_chain WHERE chain_id = 1 FOR UPDATE");
              ResultSet rs = ps.executeQuery()) {
             if (!rs.next()) throw new SQLException("audit_chain head missing");
             lastId = rs.getLong(1);
             lastHash = rs.getString(2);
         }
+        // ID もシーケンスではなく先頭行から決める（欠番があれば削除を疑えるよう、連番を保証する）
         long id = lastId + 1;
         // Millisecond precision: what is hashed must survive the round trip through the DB unchanged
         LocalDateTime ts = at.truncatedTo(ChronoUnit.MILLIS);
@@ -85,6 +95,7 @@ public class AuditRepository {
             ps.executeUpdate();
         }
         try (PreparedStatement ps = c.prepareStatement(
+                // 追記した行を新しい先頭として記録する（同じトランザクション内なので、行の追加と先頭の更新は必ず一緒に確定する）
                 "UPDATE audit_chain SET last_id = ?, last_hash = ? WHERE chain_id = 1")) {
             ps.setLong(1, id);
             ps.setString(2, hash);
@@ -94,6 +105,14 @@ public class AuditRepository {
                 .withRequestKey(requestKey);
     }
 
+    /**
+     * 条件に合う監査ログの件数を返す。
+     *
+     * @param c DB 接続
+     * @param f 検索条件
+     * @return 件数
+     * @throws SQLException DB アクセスに失敗した場合
+     */
     public long count(Connection c, Filter f) throws SQLException {
         List<Object> params = new ArrayList<>();
         try (PreparedStatement ps = c.prepareStatement("SELECT COUNT(*) FROM audit_log" + where(f, params))) {
@@ -139,6 +158,7 @@ public class AuditRepository {
         }
     }
 
+    // 指定された条件だけを AND でつなぎ、値はすべてバインド変数として params に追加する
     private static String where(Filter f, List<Object> params) {
         StringBuilder sb = new StringBuilder(" WHERE 1 = 1");
         if (f.from != null) {
@@ -164,10 +184,12 @@ public class AuditRepository {
         return sb.toString();
     }
 
+    // where() で積んだ順にバインド変数を設定する
     private static void bind(PreparedStatement ps, List<Object> params) throws SQLException {
         for (int i = 0; i < params.size(); i++) ps.setObject(i + 1, params.get(i));
     }
 
+    // SELECT 結果を AuditEntry のリストに変換する
     private static List<AuditEntry> read(PreparedStatement ps) throws SQLException {
         try (ResultSet rs = ps.executeQuery()) {
             List<AuditEntry> list = new ArrayList<>();

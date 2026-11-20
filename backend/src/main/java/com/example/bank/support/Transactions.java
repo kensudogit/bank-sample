@@ -20,9 +20,15 @@ import java.sql.SQLTransientException;
  * </ul>
  */
 public final class Transactions {
+    /** 一時的な障害時の最大試行回数（初回を含む） */
     public static final int MAX_ATTEMPTS = 3;
     private static final Logger LOG = LogManager.getLogger(Transactions.class);
 
+    /**
+     * トランザクション内で実行する処理。
+     *
+     * @param <T> 処理結果の型
+     */
     @FunctionalInterface
     public interface Work<T> {
         T run(Connection connection) throws SQLException;
@@ -32,25 +38,31 @@ public final class Transactions {
 
     /** 例外（業務例外含む）発生時はロールバックして再送出する。一時的な障害はコミット前なら再試行する。 */
     public static <T> T inTransaction(DataSource dataSource, Work<T> work) {
+        // 戻り値は work の結果。回復しない DB エラーやコミット結果不明は DataAccessException で通知する
         SQLException last = null;
         for (int attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
             boolean committing = false;
             try (Connection c = dataSource.getConnection()) {
                 boolean autoCommit = c.getAutoCommit();
+                // 自動コミットを止め、work 内の複数 SQL（残高更新・明細・仕訳・監査）を 1 つのトランザクションにまとめる
                 c.setAutoCommit(false);
                 try {
                     T result = work.run(c);
+                    // ここから先の障害はコミットされたかどうか分からないため、再試行してはいけない（二重記帳の恐れ）
                     committing = true;
                     c.commit();
                     return result;
                 } catch (SQLException | RuntimeException e) {
+                    // 業務例外（BankException）も含めて全体を取り消す。部分的に更新された残高や明細を残さない
                     if (!committing) rollbackQuietly(c, e);
                     throw e;
                 } finally {
+                    // 接続はプールに返されて再利用されるので、自動コミットの設定を元に戻しておく
                     restoreQuietly(c, autoCommit);
                 }
             } catch (SQLException e) {
                 last = e;
+                // 再試行できるのは「コミット前の一時的な障害」だけ。ロールバック済みなので最初からやり直しても安全
                 if (committing || !isTransient(e) || attempt == MAX_ATTEMPTS) {
                     throw new DataAccessException(committing ? "commit failed (outcome unknown)" : "database error", e);
                 }
@@ -63,6 +75,7 @@ public final class Transactions {
 
     /** 読み取り専用処理。一時的な障害は再試行する。 */
     public static <T> T readOnly(DataSource dataSource, Work<T> work) {
+        // 更新しないのでトランザクションを張らない（自動コミットのまま）。再試行しても副作用がない
         for (int attempt = 1; ; attempt++) {
             try (Connection c = dataSource.getConnection()) {
                 return work.run(c);
@@ -92,6 +105,7 @@ public final class Transactions {
         return false;
     }
 
+    // 待ち時間を 50ms, 200ms と二乗で伸ばし、デッドロックした相手の処理が先に終わる余地を作る
     private static void backoff(int attempt) {
         try {
             Thread.sleep(50L * attempt * attempt);
@@ -100,6 +114,7 @@ public final class Transactions {
         }
     }
 
+    // ロールバック自体の失敗で元の例外が隠れないよう、抑制された例外として付け足す
     private static void rollbackQuietly(Connection c, Exception original) {
         try {
             c.rollback();

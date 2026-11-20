@@ -30,9 +30,11 @@ import static org.junit.jupiter.api.Assertions.*;
 /** 認証・認可の前提となるサービス、監査ログ、日次上限、口座検索、夜間バッチのテスト。 */
 class SecurityAndOperationsTest {
     private static final ZoneId JST = ZoneId.of("Asia/Tokyo");
+    // db/init/04_security.sql のデモ利用者と同じパスワード（ハッシュは Java の外で生成したもの）
     /** Same password as the demo users in db/init/04_security.sql (hashes generated outside Java) */
     private static final String DEMO_PASSWORD = "BankDemo#2026";
 
+    // テストから時刻を進められる時計（ロック期限や夜間バッチの日付を再現する）
     /** Clock that tests can move. */
     static final class MutableClock extends Clock {
         private Instant now;
@@ -53,6 +55,7 @@ class SecurityAndOperationsTest {
     private BankService bank;
     private CustomerService customers;
 
+    /** テストごとに新しいインメモリ DB を作り、時計を 2026-11-20 10:00 に設定する。 */
     @BeforeEach
     void setUp() {
         db = TestDatabase.create();
@@ -65,11 +68,13 @@ class SecurityAndOperationsTest {
 
     private static String key() { return UUID.randomUUID().toString(); }
 
+    // 業務例外が期待どおりのエラーコードで発生することを確かめる
     private static void assertError(ErrorCode expected, Executable call) {
         BankException e = assertThrows(BankException.class, call);
         assertEquals(expected, e.getCode());
     }
 
+    // テストの前提を作るため、DB を直接書き換える
     private void sql(String statement) throws Exception {
         try (Connection c = db.getConnection(); Statement st = c.createStatement()) {
             st.execute(statement);
@@ -78,6 +83,7 @@ class SecurityAndOperationsTest {
 
     // ---- passwords / login ----
 
+    /** パスワードのハッシュ化（ソルト付き・照合・ポリシー）。 */
     @Test
     void passwordHashing() {
         String h = PasswordHasher.hash("Abcdefgh12");
@@ -93,6 +99,7 @@ class SecurityAndOperationsTest {
         assertTrue(PasswordHasher.meetsPolicy(PasswordHasher.randomPassword(12)));
     }
 
+    /** 初期データのデモ利用者でログインできる。 */
     @Test
     void demoUsersFromSeedCanLogIn() {
         for (String userId : Arrays.asList("yamada", "sato", "suzuki", "takahashi", "teller1", "supervisor1", "supervisor2")) {
@@ -108,6 +115,7 @@ class SecurityAndOperationsTest {
         assertNull(teller.getCustomerId());
     }
 
+    /** 連続して誤ったパスワードを入れると一定時間ロックされる。 */
     @Test
     void wrongPasswordsLockTheAccountTemporarily() {
         assertError(ErrorCode.AUTH_FAILED, () -> auth.login("nobody", DEMO_PASSWORD));
@@ -119,11 +127,13 @@ class SecurityAndOperationsTest {
 
         clock.set(LocalDateTime.of(2026, 11, 20, 10, AuthService.LOCK_MINUTES + 1));
         assertEquals("sato", auth.login("sato", DEMO_PASSWORD).getUserId());
+        // ログインに成功すると失敗回数がリセットされる
         // A success resets the counter
         assertError(ErrorCode.AUTH_FAILED, () -> auth.login("sato", "wrong-password-1"));
         assertEquals("sato", auth.login("sato", DEMO_PASSWORD).getUserId());
     }
 
+    /** パスワード変更（現在のパスワードの確認・ポリシー違反の拒否）。 */
     @Test
     void passwordChange() {
         LoginUser u = auth.login("suzuki", DEMO_PASSWORD);
@@ -135,6 +145,7 @@ class SecurityAndOperationsTest {
         assertEquals("suzuki", auth.login("suzuki", "NewPassword2026").getUserId());
     }
 
+    /** 顧客ログインの発行は本人確認済みが条件で、初回ログイン時にパスワード変更を求める。 */
     @Test
     void customerLoginIssueRequiresKycAndForcesPasswordChange() {
         Customer c = customers.register(new NewCustomer("伊藤 健", "イトウ ケン", LocalDate.of(1990, 4, 1), "060-0001",
@@ -155,6 +166,7 @@ class SecurityAndOperationsTest {
         assertError(ErrorCode.LOGIN_ALREADY_ISSUED, () -> auth.issueCustomerLogin("CU0001"));   // seed user exists
     }
 
+    /** 本人確認の判定は、申込を受け付けた行員とは別の人でなければならない（職務分離）。 */
     @Test
     void kycDecisionNeedsADifferentPersonThanTheRegistrant() {
         Customer c = customers.register(new NewCustomer("伊藤 健", "イトウ ケン", LocalDate.of(1990, 4, 1), "060-0001",
@@ -168,6 +180,7 @@ class SecurityAndOperationsTest {
 
     // ---- audit log ----
 
+    /** 監査ログのハッシュチェーンで改ざん・途中の削除・末尾の削除を検出する。 */
     @Test
     void auditChainDetectsTamperingAndDeletion() throws Exception {
         LoginUser teller = auth.login("teller1", DEMO_PASSWORD);
@@ -200,6 +213,7 @@ class SecurityAndOperationsTest {
 
     // ---- limits / search ----
 
+    /** 1 口座 1 日あたりの出金合計の上限。 */
     @Test
     void dailyOutflowLimitPerAccount() {
         for (int i = 0; i < 3; i++) bank.deposit("1000004", new BigDecimal("10000000"), null, key());
@@ -209,12 +223,14 @@ class SecurityAndOperationsTest {
         bank.withdraw("1000004", BigDecimal.ONE, null, key());   // exactly 20,000,000 today
         assertError(ErrorCode.DAILY_LIMIT_EXCEEDED,
                 () -> bank.transfer("1000004", "1000001", BigDecimal.ONE, null, key()));
+        // 入金は上限の対象外。翌日になると合計は 0 から数え直す
         // Deposits are not limited; the next day starts a new total
         bank.deposit("1000004", BigDecimal.ONE, null, key());
         clock.set(LocalDateTime.of(2026, 11, 21, 9, 0));
         bank.withdraw("1000004", new BigDecimal("10000000"), null, key());
     }
 
+    /** 口座検索は顧客なら本人の口座に限られ、ページングされる。 */
     @Test
     void accountSearchIsScopedAndPaged() {
         Map<String, Object> own = bank.searchAccounts("CU0001", null, 1, 50);
@@ -242,6 +258,7 @@ class SecurityAndOperationsTest {
 
     // ---- nightly batch ----
 
+    /** 夜間バッチは同じ業務日に 1 回だけ実行される（2 回目の呼び出しでは何もしない）。 */
     @Test
     void nightlyJobsRunOncePerBusinessDay() {
         clock.set(LocalDateTime.of(2026, 3, 1, 0, 30));
@@ -250,26 +267,29 @@ class SecurityAndOperationsTest {
 
         clock.set(LocalDateTime.of(2026, 3, 1, 1, 5));
         assertEquals(Arrays.asList(JobRunner.DORMANCY, JobRunner.TIME_MATURITY, JobRunner.LOAN_DUE, JobRunner.DIRECT_DEBIT,
-                JobRunner.INTEREST, JobRunner.REQUEST_CLEANUP), jobs.runDue());
+                JobRunner.INTEREST, JobRunner.LEDGER_CHECK, JobRunner.REQUEST_CLEANUP), jobs.runDue());
         assertTrue(jobs.runDue().isEmpty());                                   // same day: already done
         assertTrue(new JobRunner(() -> db, clock).runDue().isEmpty());         // another instance too
 
+        // 利息は 2 月末まで決算された
         // Interest was settled through the end of February
         assertEquals("INTEREST", bank.getRecentTransactions("1000004").get(1).getTxType());
+        // 2026-03-01 時点の休眠処理: 1000006（最終異動 2015-06-01）が休眠になった
         // Dormancy as of 2026-03-01: 1000006 (last activity 2015-06-01) became dormant
         assertEquals("DORMANT", bank.getAccount("1000006").getStatus());
 
         clock.set(LocalDateTime.of(2026, 3, 2, 1, 5));
         assertEquals(Arrays.asList(JobRunner.DORMANCY, JobRunner.TIME_MATURITY, JobRunner.LOAN_DUE, JobRunner.DIRECT_DEBIT,
-                JobRunner.REQUEST_CLEANUP), jobs.runDue());   // no interest
+                JobRunner.LEDGER_CHECK, JobRunner.REQUEST_CLEANUP), jobs.runDue());   // no interest
 
         List<Map<String, Object>> runs = jobs.recentRuns(20);
-        assertEquals(11, runs.size());
+        assertEquals(13, runs.size());
         for (Map<String, Object> r : runs) assertEquals("SUCCESS", r.get("outcome"));
-        assertEquals(11L, audit.search(null, null, "SYSTEM", null, null, 1, 50).get("total"));
+        assertEquals(13L, audit.search(null, null, "SYSTEM", null, null, 1, 50).get("total"));
         assertEquals(true, audit.verify().get("valid"));
     }
 
+    /** 冪等キーの削除は保存期間を過ぎたものだけを対象にする。 */
     @Test
     void requestCleanupRemovesOnlyOldKeys() throws Exception {
         String oldKey = key();

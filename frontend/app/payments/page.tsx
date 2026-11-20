@@ -491,10 +491,10 @@ function ZenginAndIncoming() {
   };
 
   const postIncoming = () => {
-    // 1行: 仕向銀行コード,振込依頼人名,口座番号,受取人名（カナ）,金額
+    // 1行: 仕向銀行コード,振込依頼人名,口座番号,受取人名（カナ）,金額,照会番号
     const items = incoming.split(/\r?\n/).map((l) => l.trim()).filter(Boolean).map((l) => {
-      const [bankCode, remitterNameKana, accountNo, nameKana, amount] = l.split(",").map((x) => x.trim());
-      return { bankCode, remitterNameKana, accountNo, nameKana, amount };
+      const [bankCode, remitterNameKana, accountNo, nameKana, amount, referenceNo] = l.split(",").map((x) => x.trim());
+      return { bankCode, remitterNameKana, accountNo, nameKana, amount, referenceNo };
     });
     return run(() => paymentApi.incoming(items),
       (r: Row[]) => `被仕向: ${r.map((x) => `${x.destAccountNo} ${remitStatusLabel[x.status]}${x.note ? `（${x.note}）` : ""}`).join("、")}`);
@@ -550,10 +550,10 @@ function ZenginAndIncoming() {
 
       <section className="card">
         <h2>他行からの振込（被仕向）</h2>
-        <p className="section-note">1行に「仕向銀行コード,振込依頼人名,口座番号,受取人名（カナ）,金額」。口座番号と受取人名が一致すれば入金、不一致は保留します。</p>
+        <p className="section-note">1行に「仕向銀行コード,振込依頼人名,口座番号,受取人名（カナ）,金額,照会番号」。口座番号と受取人名が一致すれば入金、不一致は保留します。仕向銀行コードと照会番号が同じ振込は二重に入金されません（重複として表示）。</p>
         <form onSubmit={(e) => { e.preventDefault(); void postIncoming(); }} style={{ maxWidth: "none" }}>
           <textarea rows={3} className="mono" value={incoming} onChange={(e) => setIncoming(e.target.value)}
-            placeholder="0005,ｶ)ﾃｽﾄｼﾖｳｼﾞ,1000003,サトウ ハナコ,120000" />
+            placeholder="0005,ｶ)ﾃｽﾄｼﾖｳｼﾞ,1000003,サトウ ハナコ,120000,ZG-20261120-0001" />
           <div className="actions"><button className="btn btn-small" type="submit">入金処理</button></div>
         </form>
         {held && held.length > 0 && (

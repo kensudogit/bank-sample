@@ -1,6 +1,10 @@
 package com.example.bank.domain;
 
+/**
+ * 明細の取引種別。金額は常に正で記録し、入金か出金かは種別で決める（{@link #isCredit()}）。
+ */
 public enum TxType {
+    // 入金・出金・振込（振込は出金側 TRANSFER_OUT と入金側 TRANSFER_IN の 2 明細で記帳する）
     DEPOSIT, WITHDRAWAL, TRANSFER_OUT, TRANSFER_IN,
     /** 利息（税引前） */
     INTEREST,

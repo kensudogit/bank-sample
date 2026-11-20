@@ -4,8 +4,10 @@ import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.*;
 
+/** Action の入力形式チェック（{@link InputRules}）の単体テスト（DB なし）。 */
 class InputRulesTest {
 
+    /** 口座番号は数字 7 桁だけを受け付ける。 */
     @Test
     void accountNo() {
         assertTrue(InputRules.isAccountNo("1000001"));
@@ -15,6 +17,7 @@ class InputRulesTest {
         assertFalse(InputRules.isAccountNo(null));
     }
 
+    /** 金額は先頭 0 なし・最大 9 桁の正の整数文字列だけを受け付ける。 */
     @Test
     void amountIsPositiveIntegerString() {
         assertTrue(InputRules.isAmount("1"));
@@ -28,6 +31,7 @@ class InputRulesTest {
         assertFalse(InputRules.isAmount(null));
     }
 
+    /** 冪等キーは英数字とハイフン 16〜64 文字。 */
     @Test
     void idempotencyKey() {
         assertTrue(InputRules.isIdempotencyKey("3f2b8c1e-8d6a-4c1e-9b7a-1a2b3c4d5e6f"));
@@ -35,6 +39,7 @@ class InputRulesTest {
         assertFalse(InputRules.isIdempotencyKey("bad key with spaces!!"));
     }
 
+    /** 顧客登録の各項目（フリガナ・郵便番号・電話番号・本人確認書類など）の形式。 */
     @Test
     void customerRegistrationFields() {
         assertTrue(InputRules.isKana("ヤマダ タロウ"));
@@ -57,6 +62,7 @@ class InputRulesTest {
         assertFalse(InputRules.isCustomerId("cu0001"));
     }
 
+    /** 日付（存在する日付・業務範囲の年）と取引種別の絞り込み指定。 */
     @Test
     void datesAndFilters() {
         assertEquals(java.time.LocalDate.of(2026, 2, 28), InputRules.toDate("2026-02-28"));
@@ -70,6 +76,7 @@ class InputRulesTest {
         assertFalse(InputRules.isAmountOrZero("00"));
     }
 
+    /** 摘要は任意で、指定時は 50 文字以内・制御文字なし。 */
     @Test
     void memo() {
         assertTrue(InputRules.isMemo(null));

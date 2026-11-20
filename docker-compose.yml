@@ -1,5 +1,11 @@
 name: bank-sample
 
+# High availability layout:
+#   browser -> lb:3000 -> frontend x2 -> lb:9080 -> liberty x2 -> oracle
+# Any single frontend / liberty instance can fail or restart without stopping the service:
+# sessions are stored in Oracle, batch jobs run once per day via the JOB_RUN table, and the load balancer
+# skips unhealthy instances. Scale with LIBERTY_REPLICAS / FRONTEND_REPLICAS in .env.
+
 services:
   # Oracle Database 23ai Free (PDB: FREEPDB1, app schema: BANK)
   oracle:
@@ -15,6 +21,7 @@ services:
     volumes:
       - ./db/init:/container-entrypoint-initdb.d:ro
       - oracle-data:/opt/oracle/oradata
+    restart: unless-stopped
     healthcheck:
       test: ["CMD", "healthcheck.sh"]
       interval: 10s
@@ -22,40 +29,72 @@ services:
       retries: 60
       start_period: 60s
 
-  # IBM WebSphere Application Server Liberty (Java 8) running the Struts 2 API WAR
+  # IBM WebSphere Application Server Liberty (Java 8) running the Struts 2 API WAR (2 instances)
   liberty:
     build:
       context: ./backend
+    image: bank-sample-liberty
+    deploy:
+      replicas: ${LIBERTY_REPLICAS:-2}
     environment:
       BANK_DB_URL: jdbc:oracle:thin:@//oracle:1521/FREEPDB1
       BANK_DB_USER: ${BANK_DB_USER:-BANK}
       BANK_DB_PASSWORD: ${BANK_DB_PASSWORD:?set BANK_DB_PASSWORD in .env}
       TZ: Asia/Tokyo
-      # Nightly batch (dormancy, interest settlement on Mar 1 / Sep 1, idempotency key cleanup) from 01:00
+      # Nightly batch (dormancy, maturities, loans, direct debit, ledger check, ...) from 01:00.
+      # Safe with several instances: each job runs once per day (JOB_RUN primary key)
       BANK_JOBS_ENABLED: ${BANK_JOBS_ENABLED:-true}
-    ports:
-      - "127.0.0.1:${LIBERTY_HOST_PORT:-9080}:9080"
     depends_on:
       oracle:
         condition: service_healthy
+    restart: unless-stopped
     healthcheck:
+      # readiness: 503 while the database is unreachable
       test: ["CMD-SHELL", "curl -fsS http://localhost:9080/bank/api/health || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 30
       start_period: 40s
 
-  # Next.js (React / TypeScript) frontend; proxies /api/bank/* to Liberty
+  # Next.js (React / TypeScript) frontend; proxies /api/bank/* to the API through the load balancer (2 instances)
   frontend:
     build:
       context: ./frontend
       args:
-        BANK_API_ORIGIN: http://liberty:9080
-    ports:
-      - "127.0.0.1:${FRONTEND_HOST_PORT:-3000}:3000"
+        BANK_API_ORIGIN: http://lb:9080
+    image: bank-sample-frontend
+    deploy:
+      replicas: ${FRONTEND_REPLICAS:-2}
     depends_on:
       liberty:
         condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:3000/login || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  # Load balancer (nginx): 127.0.0.1:3000 for browsers, 127.0.0.1:9080 for the API
+  lb:
+    image: nginx:1.28-alpine
+    volumes:
+      - ./lb/nginx.conf:/etc/nginx/nginx.conf:ro
+    ports:
+      - "127.0.0.1:${FRONTEND_HOST_PORT:-3000}:3000"
+      - "127.0.0.1:${LIBERTY_HOST_PORT:-9080}:9080"
+    depends_on:
+      liberty:
+        condition: service_healthy
+      frontend:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:3000/lb-health || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
 
 volumes:
   oracle-data:

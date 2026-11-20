@@ -13,6 +13,7 @@ import java.util.Base64;
  * 形式: {@code pbkdf2_sha256$<反復回数>$<salt base64>$<hash base64>}（反復回数を含むため将来の引き上げに対応できる）。
  */
 public final class PasswordHasher {
+    /** PBKDF2 の反復回数（総当たりのコストを上げる。保存値に回数を含めるので後から変更できる） */
     public static final int ITERATIONS = 120_000;
     private static final int SALT_BYTES = 16;
     private static final int HASH_BITS = 256;
@@ -23,6 +24,12 @@ public final class PasswordHasher {
 
     private PasswordHasher() {}
 
+    /**
+     * パスワードをランダムなソルト付きでハッシュ化する。
+     *
+     * @param password 平文のパスワード
+     * @return 保存用の文字列（形式はクラスの説明を参照）
+     */
     public static String hash(String password) {
         byte[] salt = new byte[SALT_BYTES];
         RANDOM.nextBytes(salt);
@@ -33,12 +40,15 @@ public final class PasswordHasher {
 
     /** 定数時間比較で照合する。stored が null（利用者なし）でも同等の計算を行う。 */
     public static boolean verify(String password, String stored) {
+        // 利用者が存在しなくてもダミーで同じ重さの計算をし、応答時間の差から ID の有無を推測されないようにする
         String target = stored == null ? DUMMY : stored;
         String[] parts = target.split("\\$");
         if (parts.length != 4 || !PREFIX.equals(parts[0])) return false;
         Base64.Decoder b64 = Base64.getDecoder();
         byte[] expected = b64.decode(parts[3]);
+        // 保存時の反復回数で再計算する（反復回数を引き上げた後も古いハッシュを検証できる）
         byte[] actual = pbkdf2(password, b64.decode(parts[2]), Integer.parseInt(parts[1]));
+        // isEqual は定数時間比較（一致した桁数で処理時間が変わらない）。ダミー照合の一致は必ず失敗にする
         return MessageDigest.isEqual(expected, actual) && stored != null;
     }
 
@@ -78,6 +88,7 @@ public final class PasswordHasher {
         }
     }
 
+    // 計算後に PBEKeySpec 内のパスワード文字配列を消去し、メモリ上に平文を残す時間を短くする
     private static byte[] pbkdf2(String password, byte[] salt, int iterations) {
         PBEKeySpec spec = new PBEKeySpec(password.toCharArray(), salt, iterations, HASH_BITS);
         try {

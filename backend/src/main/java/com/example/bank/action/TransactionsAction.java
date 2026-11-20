@@ -20,14 +20,18 @@ public class TransactionsAction extends BaseApiAction {
     private String page;
     private String size;
 
+    // 以下は validate() で変換した値（execute() で再変換しないよう保持する）
     private LocalDate fromDate;
     private LocalDate toDate;
     private List<TxType> typeList;
 
+    /** Struts が使う既定コンストラクタ。 */
     public TransactionsAction() { this(BankService.getDefault()); }
 
+    /** @param service 業務サービス（テスト用） */
     public TransactionsAction(BankService service) { super(service); }
 
+    /** 口座番号・期間・取引種別・ページの形式を検証する。 */
     @Override
     public void validate() {
         accountNo = InputRules.trim(accountNo);
@@ -40,6 +44,7 @@ public class TransactionsAction extends BaseApiAction {
         if (InputRules.emptyToNull(to) != null && !InputRules.isReasonableDate(toDate)) {
             addFieldError("to", getText("validation.date"));
         }
+        // 開始日が終了日より後の場合は、空の結果を返すのではなく入力エラーとして知らせる
         if (fromDate != null && toDate != null && fromDate.isAfter(toDate)) {
             addFieldError("to", getText("validation.dateRange"));
         }
@@ -53,6 +58,11 @@ public class TransactionsAction extends BaseApiAction {
         }
     }
 
+    /**
+     * 取引履歴を検索する。
+     *
+     * @return success、本人以外の口座なら notFound
+     */
     @Override
     public String execute() {
         try {
@@ -64,10 +74,16 @@ public class TransactionsAction extends BaseApiAction {
         }
     }
 
+    /** @param accountNo 口座番号 */
     @StrutsParameter public void setAccountNo(String accountNo) { this.accountNo = accountNo; }
+    /** @param from 期間の開始日 */
     @StrutsParameter public void setFrom(String from) { this.from = from; }
+    /** @param to 期間の終了日 */
     @StrutsParameter public void setTo(String to) { this.to = to; }
+    /** @param types 取引種別（カンマ区切り） */
     @StrutsParameter public void setTypes(String types) { this.types = types; }
+    /** @param page ページ番号 */
     @StrutsParameter public void setPage(String page) { this.page = page; }
+    /** @param size 1 ページの件数 */
     @StrutsParameter public void setSize(String size) { this.size = size; }
 }

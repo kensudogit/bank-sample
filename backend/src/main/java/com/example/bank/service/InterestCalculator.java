@@ -16,11 +16,14 @@ import java.util.List;
  * </ul>
  */
 public final class InterestCalculator {
+    /** 国税の税率（所得税 15% + 復興特別所得税 0.315%） */
     public static final BigDecimal NATIONAL_TAX_RATE = new BigDecimal("0.15315");
+    /** 地方税（住民税利子割）の税率 */
     public static final BigDecimal LOCAL_TAX_RATE = new BigDecimal("0.05");
     private static final BigDecimal DAYS_PER_YEAR = new BigDecimal("365");
     private static final BigDecimal HUNDRED = new BigDecimal("100");
 
+    // 計算用の static メソッドだけを持つためインスタンス化させない
     private InterestCalculator() {}
 
     /** 適用開始日つきの年利（%）。 */
@@ -28,6 +31,10 @@ public final class InterestCalculator {
         final LocalDate effectiveFrom;
         final BigDecimal annualPercent;
 
+        /**
+         * @param effectiveFrom 適用開始日
+         * @param annualPercent 年利（%）
+         */
         public Rate(LocalDate effectiveFrom, BigDecimal annualPercent) {
             this.effectiveFrom = effectiveFrom;
             this.annualPercent = annualPercent;
@@ -39,6 +46,10 @@ public final class InterestCalculator {
         final LocalDateTime at;
         final BigDecimal balanceAfter;
 
+        /**
+         * @param at           取引日時
+         * @param balanceAfter 取引後残高
+         */
         public BalanceChange(LocalDateTime at, BigDecimal balanceAfter) {
             this.at = at;
             this.balanceAfter = balanceAfter;
@@ -53,6 +64,7 @@ public final class InterestCalculator {
         public final BigDecimal nationalTax;
         public final BigDecimal localTax;
 
+        // 税は国税・地方税をそれぞれ切り捨てる（合計してから切り捨てると 1 円ずれることがある）
         Calculation(int days, BigDecimal balanceDays, BigDecimal grossInterest) {
             this.days = days;
             this.balanceDays = balanceDays;
@@ -61,6 +73,7 @@ public final class InterestCalculator {
             this.localTax = tax(grossInterest, LOCAL_TAX_RATE);
         }
 
+        /** @return 税引後利息（税引前利息 − 国税 − 地方税） */
         public BigDecimal netInterest() { return grossInterest.subtract(nationalTax).subtract(localTax); }
     }
 
@@ -95,6 +108,7 @@ public final class InterestCalculator {
             weighted = weighted.add(balance.multiply(rate));
             days++;
         }
+        // 日ごとに丸めると端数の誤差がたまるため、期間全体の合計を最後に 1 回だけ切り捨てる
         BigDecimal gross = weighted.divide(HUNDRED, 10, RoundingMode.DOWN)
                 .divide(DAYS_PER_YEAR, 0, RoundingMode.DOWN);
         return new Calculation(days, balanceDays, gross);

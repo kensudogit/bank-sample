@@ -11,6 +11,14 @@ public final class DormancyReport {
     private final int noticed;
     private final int madeDormant;
 
+    /**
+     * @param asOf            基準日
+     * @param noticeTargets   休眠前の通知対象
+     * @param dormancyTargets 休眠化の対象
+     * @param dormantAccounts 休眠中の口座
+     * @param noticed         通知を記録した件数
+     * @param madeDormant     休眠にした件数
+     */
     public DormancyReport(String asOf, List<Account> noticeTargets, List<Account> dormancyTargets,
                           List<Account> dormantAccounts, int noticed, int madeDormant) {
         this.asOf = asOf;
@@ -21,6 +29,7 @@ public final class DormancyReport {
         this.madeDormant = madeDormant;
     }
 
+    /** @return 基準日 */
     public String getAsOf() { return asOf; }
     /** 最終異動から 9 年以上・残高 1 万円以上・未通知（休眠前の通知対象） */
     public List<Account> getNoticeTargets() { return noticeTargets; }

@@ -39,6 +39,7 @@ class AccountLifecycleTest {
     private InterestService interest;
     private AccountLifecycleService lifecycle;
 
+    /** テストごとに新しいインメモリ DB を作り、日時を固定したサービスを用意する（テスト間で状態を共有しない）。 */
     @BeforeEach
     void setUp() {
         TestDatabase db = TestDatabase.create();
@@ -56,6 +57,7 @@ class AccountLifecycleTest {
         assertEquals(0, yen(expected).compareTo(actual), "expected " + expected + " but was " + actual);
     }
 
+    // 業務例外が期待どおりのエラーコードで発生することを確かめる
     private static void assertError(ErrorCode expected, Executable call) {
         BankException e = assertThrows(BankException.class, call);
         assertEquals(expected, e.getCode());
@@ -77,6 +79,7 @@ class AccountLifecycleTest {
 
     // ---- 口座開設・本人確認 ----
 
+    /** 口座開設は本人確認済み（VERIFIED）の顧客のみ。同じ種別の口座は 1 顧客 1 口座まで。 */
     @Test
     void accountOpeningRequiresVerifiedKyc() {
         Customer c = customers.register(applicant("イトウ ケン", LocalDate.of(1990, 4, 1)), key());
@@ -105,16 +108,19 @@ class AccountLifecycleTest {
         assertLedgerConsistent();
     }
 
+    /** 申込のルール: 年齢制限・名寄せ（同じカナ氏名と生年月日）・謝絶後の再申込。 */
     @Test
     void registrationRules() {
         assertError(ErrorCode.AGE_RESTRICTION,
                 () -> customers.register(applicant("ワカモノ タロウ", TODAY.minusYears(18).plusDays(1)), key()));
         customers.register(applicant("ワカモノ タロウ", TODAY.minusYears(18)), key());   // 18th birthday today
 
+        // 既存顧客と同じカナ氏名・生年月日（名寄せで既存顧客と判定される）
         // Same kana + birth date as an existing customer (名寄せ)
         assertError(ErrorCode.CUSTOMER_ALREADY_EXISTS,
                 () -> customers.register(applicant("ヤマダ タロウ", LocalDate.of(1980, 5, 12)), key()));
 
+        // 謝絶された申込者は再申込できるが、謝絶された顧客は口座を開設できない
         // A rejected applicant can apply again; rejected customers cannot open accounts
         Customer rejected = customers.register(applicant("サイシンセイ ハナ", LocalDate.of(1985, 1, 1)), key());
         customers.decideKyc(rejected.getCustomerId(), "REJECTED", "書類の有効期限切れ");
@@ -131,6 +137,7 @@ class AccountLifecycleTest {
 
     // ---- 振替・取引履歴 ----
 
+    /** 振替（ownAccountsOnly）は同じ顧客の口座間に限られる。 */
     @Test
     void ownAccountTransferIsLimitedToSameCustomer() {
         bank.transfer("1000001", "1000002", yen(1000), "振替", key(), true);
@@ -138,6 +145,7 @@ class AccountLifecycleTest {
         assertLedgerConsistent();
     }
 
+    /** 取引履歴の検索: 期間・種別での絞り込み、ページング、期首／期末残高と入出金合計。 */
     @Test
     void historySearchFiltersPagesAndReportsPeriodBalances() {
         bank.deposit("1000001", yen(1000), "a", key());
@@ -175,9 +183,11 @@ class AccountLifecycleTest {
 
     // ---- 利息・税 ----
 
+    /** 利息決算は同じ期間を二重に決算せず、利息の入金で最終異動日を更新しない。 */
     @Test
     void interestSettlementCreditsNetInterestOnceAndKeepsLastActivity() {
         String lastActivity = bank.getAccount("1000004").getLastActivityAt();
+        // 1000004: 2026-01-06 から 120,000 円。2026-03-01 時点で決算 → 計算期間は 2026-01-06〜2026-02-28（54 日）
         // 1000004: 120,000 yen since 2026-01-06; settle as of 2026-03-01 -> 2026-01-06..2026-02-28 (54 days)
         InterestResult preview = interest.preview("1000004", LocalDate.of(2026, 3, 1));
         assertFalse(preview.isSettled());
@@ -199,13 +209,17 @@ class AccountLifecycleTest {
         assertEquals("INTEREST", recent.get(1).getTxType());
         assertYen(35, recent.get(1).getAmount());
 
+        // 同じ期間をもう一度決算しても対象期間はない
         // Same period again: nothing to settle
         assertFalse(interest.settle("1000004", LocalDate.of(2026, 3, 1)).isSettled());
+        // 次の期間は決算済み期間の翌日から。利息は処理時点（2026-11-20、遡及した決算）に記帳されたため、
+        // 2026-03-01 の残高は利息入金前のまま
         // Next period starts the day after the settled one. The interest was posted at processing time
         // (2026-11-20, back-dated settlement), so 2026-03-01 still has the pre-interest balance.
         InterestResult next = interest.preview("1000004", LocalDate.of(2026, 3, 2));
         assertEquals("2026-03-01", next.getPeriodFrom());
         assertYen(120000, next.getBalanceDays());
+        // 入金された利息は記帳された日から積数に入る: 2026-03-01〜2026-11-19（264 日）は 120,000 円、2026-11-20 は 120,029 円
         // ...and the credited interest counts from the day it was posted:
         // 2026-03-01..2026-11-19 (264 days) at 120,000 + 2026-11-20 at 120,029
         InterestResult throughToday = interest.preview("1000004", TODAY.plusDays(1));
@@ -217,6 +231,7 @@ class AccountLifecycleTest {
         assertLedgerConsistent();
     }
 
+    /** 一括決算では解約済みの口座を対象にしない。 */
     @Test
     void bulkSettlementSkipsClosedAccounts() {
         lifecycle.close("1000004", null, key());
@@ -231,6 +246,7 @@ class AccountLifecycleTest {
 
     // ---- 解約 ----
 
+    /** 解約: 前日までの利息を決算し、利息を含む全額を本人の別口座へ払い戻して CLOSED にする。 */
     @Test
     void closingSettlesInterestAndPaysOutToOwnAccount() {
         BigDecimal payoutBefore = bank.getAccount("1000002").getBalance();
@@ -251,6 +267,7 @@ class AccountLifecycleTest {
         assertLedgerConsistent();
     }
 
+    /** 解約できない条件（同じ口座への払戻し・他人の口座への払戻し・取引不可の状態など）。 */
     @Test
     void closingRules() {
         assertError(ErrorCode.NOT_OWN_ACCOUNT, () -> lifecycle.close("1000001", "1000003", key()));
@@ -266,6 +283,7 @@ class AccountLifecycleTest {
 
     // ---- 休眠預金 ----
 
+    /** 休眠管理: 9 年で通知、10 年かつ通知から 1 か月で休眠、休眠解除、顧客取引による通知のリセット。 */
     @Test
     void dormancyNoticeDormantAndReactivation() {
         DormancyReport report = lifecycle.dormancyReport(TODAY);
@@ -280,11 +298,13 @@ class AccountLifecycleTest {
         assertEquals("ACTIVE", bank.getAccount("1000007").getStatus());
         assertEquals(0, lifecycle.runDormancy(TODAY).getMadeDormant());   // nothing left today
 
+        // 1000007 は 10 年経過し、通知から 1 か月たつと休眠になる
         // 1000007 becomes dormant once 10 years have passed and the notice is a month old
         DormancyReport later = lifecycle.dormancyReport(LocalDate.of(2027, 3, 2));
         assertEquals(Collections.singletonList("1000007"), accountNos(later.getDormancyTargets()));
         assertError(ErrorCode.INVALID_BASE_DATE, () -> lifecycle.runDormancy(TODAY.plusDays(1)));
 
+        // 休眠口座は休眠解除するまで取引できない
         // Dormant accounts cannot transact until reactivated
         assertError(ErrorCode.ACCOUNT_NOT_ACTIVE, () -> bank.deposit("1000006", yen(1000), null, key()));
         assertError(ErrorCode.ACCOUNT_NOT_DORMANT, () -> lifecycle.reactivate("1000007", key()));
@@ -293,6 +313,7 @@ class AccountLifecycleTest {
         assertNull(reactivated.getDormantAt());
         bank.deposit("1000006", yen(1000), null, key());
 
+        // 顧客による取引があると、9 年経過の通知はリセットされる
         // Any customer transaction resets the 9-year notice
         bank.deposit("1000007", yen(1), null, key());
         assertNull(bank.getAccount("1000007").getDormancyNotifiedAt());
@@ -300,6 +321,7 @@ class AccountLifecycleTest {
         assertLedgerConsistent();
     }
 
+    // 比較しやすいよう口座番号だけの一覧にする
     private static List<String> accountNos(List<Account> accounts) {
         String[] nos = new String[accounts.size()];
         for (int i = 0; i < nos.length; i++) nos[i] = accounts.get(i).getAccountNo();

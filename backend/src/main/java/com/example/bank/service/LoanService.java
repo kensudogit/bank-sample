@@ -45,6 +45,7 @@ import static com.example.bank.repository.ProductRepository.query;
  * </ul>
  */
 public class LoanService {
+    /** シンジケートローンの参加行のうち当行を表す名称 */
     public static final String OUR_BANK = "永劫銀行";
     private static final BigDecimal HUNDRED = new BigDecimal("100");
 
@@ -57,15 +58,21 @@ public class LoanService {
     private final CustomerRepository customers = new CustomerRepository();
     private final OperationRequestRepository requests = new OperationRequestRepository();
 
+    /**
+     * @param dataSource 接続の取得元
+     * @param clock      契約日・返済日・延滞日数の判定に使う時計
+     */
     public LoanService(Supplier<DataSource> dataSource, Clock clock) {
         this.dataSource = dataSource;
         this.clock = clock;
     }
 
+    /** @return アプリケーション既定のインスタンス */
     public static LoanService getDefault() { return DEFAULT; }
 
     /** 融資申込の入力。 */
     public static final class Application {
+        // 項目は Action が検証済みの値を詰めて渡す（入れ物なので public フィールドにしている）
         public String customerId;
         public String product;
         public BigDecimal amount;
@@ -81,7 +88,16 @@ public class LoanService {
 
     // ===================== application / screening / decision =====================
 
+    /**
+     * 融資を申し込む（状態 APPLIED）。
+     *
+     * @param a         申込内容
+     * @param appliedBy 受付した利用者（後の決裁者と同じ人にはできない）
+     * @return 申込の内容
+     * @throws BankException 本人確認未了・個人／法人の商品区分違い・金額や期間の範囲外など
+     */
     public Map<String, Object> apply(Application a, String appliedBy) {
+        // 商品ごとの金額・期間の範囲は DB に触れる前に確かめる
         validateProduct(a);
         return Transactions.inTransaction(dataSource.get(), c -> {
             Customer customer = customers.findById(c, a.customerId)
@@ -103,6 +119,7 @@ public class LoanService {
         });
     }
 
+    // 商品ごとに期間（月）と金額（円）の範囲を確かめる
     private static void validateProduct(Application a) {
         if (a.product == null || !CreditScoring.BASE_RATE.containsKey(a.product) || a.amount == null
                 || a.amount.signum() <= 0 || a.amount.scale() > 0 || a.annualIncome == null || a.annualIncome.signum() < 0) {
@@ -143,6 +160,7 @@ public class LoanService {
         }
     }
 
+    // 期間・金額が商品の範囲外なら LOAN_RULE_VIOLATION
     private static void range(int term, int minTerm, int maxTerm, long amount, long minAmount, long maxAmount) {
         if (term < minTerm || term > maxTerm) throw new BankException(ErrorCode.LOAN_RULE_VIOLATION, "期間 " + minTerm + "〜" + maxTerm + " か月");
         if (amount < minAmount || amount > maxAmount) {
@@ -153,6 +171,7 @@ public class LoanService {
     /** 与信審査（スコアリング）。担保を追加した後は再審査できる。 */
     public Map<String, Object> screen(long applicationId, String screenedBy) {
         return Transactions.inTransaction(dataSource.get(), c -> {
+            // 申込行をロックし、審査・決裁・担保追加などの状態遷移が同時に走って矛盾するのを防ぐ
             Map<String, Object> app = lockApplication(c, applicationId);
             requireStatus(app, "APPLIED", "SCREENED");
             String customerId = (String) app.get("customerId");
@@ -169,6 +188,7 @@ public class LoanService {
             BigDecimal registered = num(query(c, "SELECT COALESCE(SUM(appraisal_value), 0) AS v FROM loan_collateral "
                     + "WHERE application_id = ? AND collateral_type IN ('REAL_ESTATE', 'DEPOSIT', 'SECURITIES')", applicationId)
                     .get(0).get("v"));
+            // 登録済みの担保（不動産・預金・有価証券）の合計と、申込時の申告額の大きい方で担保掛目を計算する
             in.collateralValue = registered.max((BigDecimal) app.get("collateralValue"));
             in.relationshipYears = Period.between(LocalDateTime.parse(customer.getCreatedAt()).toLocalDate(), today).getYears();
             in.delinquentLoans = num(query(c, "SELECT COUNT(*) AS n FROM loan WHERE customer_id = ? AND status = 'DELINQUENT'",
@@ -195,6 +215,7 @@ public class LoanService {
         return Transactions.inTransaction(dataSource.get(), c -> {
             Map<String, Object> app = lockApplication(c, applicationId);
             requireStatus(app, "SCREENED");
+            // 受付者と決裁者を分け、1 人で申込から承認まで完結できないようにする（職務分離）
             if (decidedBy != null && decidedBy.equals(app.get("appliedBy"))) {
                 throw new BankException(ErrorCode.SEGREGATION_OF_DUTIES);
             }
@@ -202,6 +223,7 @@ public class LoanService {
                 throw new BankException(ErrorCode.LOAN_RULE_VIOLATION, "謝絶推奨の案件を承認する理由");
             }
             BigDecimal finalRate = rate != null ? rate : (BigDecimal) app.get("proposedRate");
+            // 利息制限法の上限を超える金利では承認させない
             if (finalRate.signum() < 0 || finalRate.compareTo(new BigDecimal("15")) > 0) {
                 throw new BankException(ErrorCode.VALIDATION_ERROR);
             }
@@ -212,6 +234,18 @@ public class LoanService {
         });
     }
 
+    /**
+     * 担保・保証を登録する（承認前後とも追加でき、追加後に再審査できる）。
+     *
+     * @param applicationId 申込番号
+     * @param type          担保の種類
+     * @param description   担保の内容
+     * @param appraisal     評価額（null は 0）
+     * @param lienRank      抵当権の順位（不動産のみ）
+     * @param guarantorName 保証人名（保証のみ）
+     * @param by            登録した行員
+     * @return 申込の内容
+     */
     public Map<String, Object> addCollateral(long applicationId, String type, String description, BigDecimal appraisal,
                                              Integer lienRank, String guarantorName, String by) {
         return Transactions.inTransaction(dataSource.get(), c -> {
@@ -225,6 +259,15 @@ public class LoanService {
         });
     }
 
+    /**
+     * シンジケートローンの参加行を登録する。
+     *
+     * @param applicationId 申込番号
+     * @param lenderName    参加行の名称
+     * @param share         分担額
+     * @param role          役割（ARRANGER / PARTICIPANT）
+     * @return 申込の内容
+     */
     public Map<String, Object> addParticipant(long applicationId, String lenderName, BigDecimal share, String role) {
         return Transactions.inTransaction(dataSource.get(), c -> {
             Map<String, Object> app = lockApplication(c, applicationId);
@@ -246,6 +289,7 @@ public class LoanService {
             requireStatus(app, "APPROVED");
             String product = (String) app.get("product");
             String customerId = (String) app.get("customerId");
+            // ロック順は「申込・融資の行 → 口座の行」で統一している。振込は口座の行だけをロックするので、この順序ならデッドロックしない
             Account account = BankService.lockActive(c, accounts, repaymentAccountNo);
             if (!customerId.equals(account.getCustomerId())) throw new BankException(ErrorCode.NOT_OWN_ACCOUNT, repaymentAccountNo);
             BankService.requireYenTransactional(account);
@@ -262,6 +306,7 @@ public class LoanService {
                         + "WHERE application_id = ?", applicationId).get(0).get("v"));
                 BigDecimal ours = num(query(c, "SELECT COALESCE(SUM(share_amount), 0) AS v FROM syndicate_participant "
                         + "WHERE application_id = ? AND lender_name = ?", applicationId, OUR_BANK).get(0).get("v"));
+                // 参加行の分担額の合計が組成総額と一致し、当行分が申込額と一致していなければ契約できない
                 if (sum.compareTo((BigDecimal) app.get("syndicateTotal")) != 0
                         || ours.compareTo((BigDecimal) app.get("requestedAmount")) != 0) {
                     throw new BankException(ErrorCode.LOAN_RULE_VIOLATION, "参加行の合計 = 組成総額、当行分 = 申込額");
@@ -269,6 +314,7 @@ public class LoanService {
             }
             boolean revolving = "REVOLVING".equals(app.get("repaymentMethod"));
             BigDecimal amount = (BigDecimal) app.get("requestedAmount");
+            // リボルビング（カードローン・当座貸越）は元本 0・極度額あり、証書貸付は元本 = 申込額・極度額なしで作る
             long loanId = insertReturningId(c, "INSERT INTO loan (application_id, customer_id, product, principal, outstanding, "
                     + "credit_limit, annual_rate, term_months, repayment_method, repayment_account_no, payment_day, grade, "
                     + "contract_date, status, contracted_by) VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, 'CONTRACTED', ?)",
@@ -285,6 +331,7 @@ public class LoanService {
         return Transactions.inTransaction(dataSource.get(), c -> {
             LocalDateTime now = LocalDateTime.now(clock);
             LocalDate today = now.toLocalDate();
+            // 融資実行は資金が動くため冪等キー必須。二重送信で貸付金が 2 回入金されるのを防ぐ
             BankService.registerRequest(c, idempotencyKey, "LOAN_EXEC", now, requests);
             Map<String, Object> loan = lockLoan(c, loanId);
             requireStatus(loan, "CONTRACTED");
@@ -296,6 +343,7 @@ public class LoanService {
                 execute(c, "UPDATE loan SET status = 'ACTIVE', start_date = ?, maturity_date = ?, last_accrual_date = ?, "
                         + "executed_by = ?, executed_at = ? WHERE loan_id = ?", today, today.plusMonths(12), today, by, now, loanId);
             } else if ("OVERDRAFT".equals(product)) {
+                // 当座貸越は資金を動かさず、口座にマイナス残高を許す極度額を設定するだけ
                 accounts.setOverdraftLimit(c, accountNo, (BigDecimal) loan.get("creditLimit"), now);
                 execute(c, "UPDATE loan SET status = 'ACTIVE', start_date = ?, maturity_date = ?, executed_by = ?, "
                         + "executed_at = ? WHERE loan_id = ?", today, today.plusMonths(12), by, now, loanId);
@@ -305,6 +353,7 @@ public class LoanService {
                 int term = num(loan.get("termMonths")).intValue();
                 int day = num(loan.get("paymentDay")).intValue();
                 LocalDate maturity = null;
+                // 返済予定表を全回分作ってから入金する（予定表と貸付残高が同じトランザクションで確定する）
                 for (LoanMath.Installment i : LoanMath.schedule(principal, rate, term, (String) loan.get("repaymentMethod"))) {
                     LocalDate due = dueDate(c, today, i.no, day);
                     maturity = due;
@@ -317,6 +366,7 @@ public class LoanService {
                         productLabel(product) + " 融資実行 No." + loanId, idempotencyKey, now);
                 execute(c, "UPDATE loan SET status = 'ACTIVE', outstanding = ?, start_date = ?, maturity_date = ?, "
                         + "executed_by = ?, executed_at = ? WHERE loan_id = ?", principal, today, maturity, by, now, loanId);
+                // 融資側の取引履歴（loan_transaction）にも記録し、口座の明細と貸付残高の両方から追えるようにする
                 loanTx(c, loanId, "DISBURSE", principal, BigDecimal.ZERO, BigDecimal.ZERO, principal, accountNo, "融資実行", by, now);
             }
             execute(c, "UPDATE loan_application SET status = 'EXECUTED' WHERE application_id = ?", loan.get("applicationId"));
@@ -327,6 +377,7 @@ public class LoanService {
     /** k 回目の約定返済日（毎月の返済日、休業日は翌営業日）。 */
     private static LocalDate dueDate(Connection c, LocalDate start, int k, int paymentDay) throws SQLException {
         LocalDate month = start.plusMonths(k);
+        // 月の日数より大きい返済日は月末に寄せる（現状は契約時に 28 日までに制限している）
         LocalDate d = month.withDayOfMonth(Math.min(paymentDay, month.lengthOfMonth()));
         return BusinessCalendar.onOrAfter(c, d);
     }
@@ -342,6 +393,7 @@ public class LoanService {
             Map<String, Object> loan = lockLoan(c, loanId);
             if (!"CARD".equals(loan.get("product"))) throw new BankException(ErrorCode.LOAN_RULE_VIOLATION, "カードローンのみ");
             requireStatus(loan, "ACTIVE");
+            // 残高が変わる前に、それまでの残高で日割利息を計上しておく（変更後の残高で過去分を計算しない）
             accrue(c, loan, now.toLocalDate());
             BigDecimal outstanding = (BigDecimal) loan.get("outstanding");
             if (outstanding.add(amount).compareTo((BigDecimal) loan.get("creditLimit")) > 0) {
@@ -373,6 +425,7 @@ public class LoanService {
             requireStatus(loan, "ACTIVE", "DELINQUENT");
             String accountNo = (String) loan.get("repaymentAccountNo");
             Account account = BankService.lockActive(c, accounts, accountNo);
+            // 返済は口座残高の範囲内で行う（当座貸越の枠を使って返済させない）
             BigDecimal available = account.getBalance().max(BigDecimal.ZERO).min(amount);
             if (available.compareTo(amount) < 0) throw new BankException(ErrorCode.INSUFFICIENT_FUNDS, accountNo);
             BigDecimal[] applied = "CARD".equals(loan.get("product"))
@@ -394,6 +447,7 @@ public class LoanService {
             BankService.registerRequest(c, idempotencyKey, "LOAN_PREPAY", now, requests);
             Map<String, Object> loan = lockLoan(c, loanId);
             requireStatus(loan, "ACTIVE");
+            // リボルビングは随時返済で元金が減るため、繰上返済の手続きは証書貸付だけ
             if ("REVOLVING".equals(loan.get("repaymentMethod"))) throw new BankException(ErrorCode.LOAN_RULE_VIOLATION, "証書貸付のみ");
             BigDecimal outstanding = (BigDecimal) loan.get("outstanding");
             if (amount.compareTo(outstanding) > 0) throw new BankException(ErrorCode.VALIDATION_ERROR);
@@ -410,6 +464,7 @@ public class LoanService {
             if (after.signum() == 0) {
                 execute(c, "UPDATE loan_schedule SET status = 'CANCELLED' WHERE loan_id = ? AND status = 'SCHEDULED'", loanId);
             } else {
+                // 残りの回数はそのままで、減った元金から返済予定を作り直す（返済額軽減型）
                 List<LoanMath.Installment> plan = LoanMath.schedule(after, (BigDecimal) loan.get("annualRate"),
                         remaining.size(), (String) loan.get("repaymentMethod"));
                 for (int i = 0; i < remaining.size(); i++) {
@@ -439,6 +494,7 @@ public class LoanService {
             BigDecimal pDue = num(s.get("principalDue")).subtract(num(s.get("principalPaid")));
             BigDecimal iDue = num(s.get("interestDue")).subtract(num(s.get("interestPaid")));
             long daysLate = ChronoUnit.DAYS.between(LocalDate.parse((String) s.get("dueDate")), today);
+            // 充当順は 遅延損害金 → 利息 → 元金（古い回から）。民法・約款上の一般的な順序に合わせる
             BigDecimal fee = LoanMath.lateFee(pDue.add(iDue), daysLate);
             BigDecimal payFee = fee.min(remaining);
             remaining = remaining.subtract(payFee);
@@ -462,6 +518,7 @@ public class LoanService {
             throws SQLException {
         accrue(c, loan, now.toLocalDate());
         long loanId = num(loan.get("loanId")).longValue();
+        // 計上済み利息は小数で持っているので、請求は円未満を切り捨てた額にする（端数は次回へ持ち越し）
         BigDecimal accrued = num(loan.get("accruedInterest")).setScale(0, RoundingMode.DOWN);
         BigDecimal payI = accrued.min(funds);
         BigDecimal payP = ((BigDecimal) loan.get("outstanding")).min(funds.subtract(payI));
@@ -469,6 +526,7 @@ public class LoanService {
         return new BigDecimal[]{payP, payI, BigDecimal.ZERO};
     }
 
+    // 返済用口座から引き落とし、明細に記録する（冪等キーは利用者操作のときだけ。夜間バッチは null）
     private void debitForLoan(Connection c, Account account, BigDecimal amount, long loanId, String label,
                               String key, LocalDateTime now) throws SQLException {
         BigDecimal balance = account.getBalance().subtract(amount);
@@ -478,8 +536,10 @@ public class LoanService {
                 "融資" + label + " No." + loanId, key, now);
     }
 
+    // 充当結果を貸付残高・融資取引に反映し、延滞状況を更新する。完済していれば融資を終了する
     private void finishPayment(Connection c, long loanId, BigDecimal[] applied, String accountNo, String memo, String by,
                                LocalDateTime now) throws SQLException {
+        // 充当中に更新した行を読み直す（ロックは同じトランザクション内で取得済み）
         Map<String, Object> loan = lockLoan(c, loanId);
         BigDecimal after = ((BigDecimal) loan.get("outstanding")).subtract(applied[0]);
         execute(c, "UPDATE loan SET outstanding = ? WHERE loan_id = ?", after, loanId);
@@ -492,6 +552,7 @@ public class LoanService {
         }
     }
 
+    // 完済: 延滞情報を消し、債務者区分を正常先に戻す
     private static void closeLoan(Connection c, long loanId, LocalDateTime now) throws SQLException {
         execute(c, "UPDATE loan SET status = 'PAID_OFF', borrower_class = 'NORMAL', days_past_due = 0, closed_at = ? "
                 + "WHERE loan_id = ?", now, loanId);
@@ -501,11 +562,13 @@ public class LoanService {
     private void accrue(Connection c, Map<String, Object> loan, LocalDate asOf) throws SQLException {
         if (!"CARD".equals(loan.get("product")) || loan.get("lastAccrualDate") == null) return;
         LocalDate last = LocalDate.parse((String) loan.get("lastAccrualDate"));
+        // 前回の計上日から基準日までの日数分だけ計上する（同じ日に何度呼ばれても二重に計上しない）
         long days = ChronoUnit.DAYS.between(last, asOf);
         if (days <= 0) return;
         BigDecimal add = LoanMath.dailyInterest((BigDecimal) loan.get("outstanding"), (BigDecimal) loan.get("annualRate"), days);
         execute(c, "UPDATE loan SET accrued_interest = accrued_interest + ?, last_accrual_date = ? WHERE loan_id = ?",
                 add, asOf, loan.get("loanId"));
+        // 呼び出し元が同じ Map を使い続けるため、DB と同じ値に更新しておく
         loan.put("accruedInterest", num(loan.get("accruedInterest")).add(add));
         loan.put("lastAccrualDate", asOf.toString());
     }
@@ -518,6 +581,7 @@ public class LoanService {
      * @return 処理件数のまとめ
      */
     public Map<String, Object> processDue(LocalDate asOf) {
+        // 対象の一覧だけ先に取り、処理は融資ごとの短いトランザクションで行う（1 件の失敗で全体を止めない）
         List<Map<String, Object>> loans = Transactions.readOnly(dataSource.get(), c -> query(c,
                 "SELECT loan_id, product FROM loan WHERE status IN ('ACTIVE', 'DELINQUENT') ORDER BY loan_id"));
         int debited = 0;
@@ -534,6 +598,7 @@ public class LoanService {
                 if ("OVERDRAFT".equals(loan.get("product"))) return new int[]{0, 0};
                 int paid = 0;
                 String accountNo = (String) loan.get("repaymentAccountNo");
+                // 休眠・凍結の口座からは引き落とさない（残高 0 とみなして延滞判定だけ行う）
                 Account account = BankService.lockExisting(c, accounts, accountNo);
                 BigDecimal funds = account.isActive() ? account.getBalance().max(BigDecimal.ZERO) : BigDecimal.ZERO;
                 if (funds.signum() > 0) {
@@ -563,12 +628,14 @@ public class LoanService {
     private static int refreshDelinquency(Connection c, long loanId, LocalDate asOf) throws SQLException {
         Map<String, Object> loan = query(c, "SELECT status, borrower_class, product FROM loan WHERE loan_id = ?", loanId).get(0);
         if (!"ACTIVE".equals(loan.get("status")) && !"DELINQUENT".equals(loan.get("status"))) return 0;
+        // 期日を過ぎても未払いの回を延滞にし、最も古い延滞の期日から延滞日数を数える
         execute(c, "UPDATE loan_schedule SET status = 'OVERDUE' WHERE loan_id = ? AND status IN ('SCHEDULED', 'PARTIAL') "
                 + "AND due_date < ?", loanId, asOf);
         List<Map<String, Object>> oldest = query(c, "SELECT MIN(due_date) AS d FROM loan_schedule WHERE loan_id = ? "
                 + "AND status = 'OVERDUE'", loanId);
         Object d = oldest.get(0).get("d");
         int dpd = d == null ? 0 : (int) ChronoUnit.DAYS.between(LocalDate.parse((String) d), asOf);
+        // 破綻先は役席が認定した区分なので、延滞日数による自動判定で上書きしない
         String cls = "BANKRUPT".equals(loan.get("borrower_class")) ? "BANKRUPT" : borrowerClass(dpd);
         execute(c, "UPDATE loan SET days_past_due = ?, borrower_class = ?, status = ? WHERE loan_id = ?",
                 dpd, cls, dpd > 0 ? "DELINQUENT" : "ACTIVE", loanId);
@@ -584,8 +651,19 @@ public class LoanService {
         return "DEFACTO";
     }
 
+    /**
+     * 督促・回収の記録を追加する。
+     *
+     * @param loanId       融資番号
+     * @param type         督促の種類
+     * @param note         内容
+     * @param promisedDate 返済の約束日（任意）
+     * @param by           記録した行員
+     * @return 融資の内容
+     */
     public Map<String, Object> addCollectionAction(long loanId, String type, String note, LocalDate promisedDate, String by) {
         return Transactions.inTransaction(dataSource.get(), c -> {
+            // 存在確認を兼ねて融資行をロックする
             lockLoan(c, loanId);
             insertReturningId(c, "INSERT INTO collection_action (loan_id, action_type, note, promised_date, created_by, created_at) "
                     + "VALUES (?, ?, ?, ?, ?, ?)", "action_id", loanId, type, note, promisedDate, by, LocalDateTime.now(clock));
@@ -604,6 +682,7 @@ public class LoanService {
                 throw new BankException(ErrorCode.LOAN_RULE_VIOLATION, "破綻懸念先以下の債権のみ");
             }
             BigDecimal outstanding = (BigDecimal) loan.get("outstanding");
+            // 償却後は回収予定がなくなるため、未払いの返済予定を取り消す（償却額は融資取引に残る）
             execute(c, "UPDATE loan_schedule SET status = 'CANCELLED' WHERE loan_id = ? AND status <> 'PAID'", loanId);
             execute(c, "UPDATE loan SET outstanding = 0, status = 'WRITTEN_OFF', closed_at = ? WHERE loan_id = ?", now, loanId);
             loanTx(c, loanId, "WRITE_OFF", outstanding, BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO, null,
@@ -623,6 +702,13 @@ public class LoanService {
 
     // ===================== queries =====================
 
+    /**
+     * 融資申込の一覧（新しい順に最大 200 件）。
+     *
+     * @param customerScope 顧客ログインなら本人の顧客番号、行員なら null
+     * @param status        状態での絞り込み（null は全件）
+     * @return 申込一覧
+     */
     public List<Map<String, Object>> listApplications(String customerScope, String status) {
         List<Object> params = new ArrayList<>();
         String where = where("a", customerScope, status, params);
@@ -632,6 +718,7 @@ public class LoanService {
                 + " ORDER BY a.application_id DESC FETCH FIRST 200 ROWS ONLY", params.toArray()));
     }
 
+    // alias と条件はコード内の固定値・バインド変数だけで組み立てる（利用者の入力を SQL に連結しない）
     private static String where(String alias, String customerScope, String status, List<Object> params) {
         StringBuilder sb = new StringBuilder(" WHERE 1 = 1");
         if (customerScope != null) {
@@ -645,6 +732,13 @@ public class LoanService {
         return sb.toString();
     }
 
+    /**
+     * 融資の一覧（新しい順に最大 200 件）。
+     *
+     * @param customerScope 顧客ログインなら本人の顧客番号、行員なら null
+     * @param status        状態での絞り込み（null は全件）
+     * @return 融資一覧
+     */
     public List<Map<String, Object>> listLoans(String customerScope, String status) {
         List<Object> params = new ArrayList<>();
         String where = where("l", customerScope, status, params);
@@ -655,10 +749,24 @@ public class LoanService {
                 + " ORDER BY l.loan_id DESC FETCH FIRST 200 ROWS ONLY", params.toArray()));
     }
 
+    /**
+     * 申込の詳細。
+     *
+     * @param applicationId 申込番号
+     * @return 申込の内容（担保・参加行を含む）
+     * @throws BankException 見つからない場合（LOAN_NOT_FOUND）
+     */
     public Map<String, Object> getApplication(long applicationId) {
         return Transactions.readOnly(dataSource.get(), c -> applicationView(c, applicationId));
     }
 
+    /**
+     * 融資の詳細。
+     *
+     * @param loanId 融資番号
+     * @return 融資の内容（返済予定表・延滞額・次回返済を含む）
+     * @throws BankException 見つからない場合（LOAN_NOT_FOUND）
+     */
     public Map<String, Object> getLoan(long loanId) {
         return Transactions.readOnly(dataSource.get(), c -> loanView(c, loanId));
     }
@@ -668,10 +776,15 @@ public class LoanService {
         return (String) getApplication(applicationId).get("customerId");
     }
 
+    /**
+     * @param loanId 融資番号
+     * @return 借主の顧客番号（アクセス権の確認用）
+     */
     public String loanOwner(long loanId) {
         return (String) getLoan(loanId).get("customerId");
     }
 
+    // 申込の内容に担保・参加行・実行済みの融資番号を加えて返す
     private Map<String, Object> applicationView(Connection c, long id) throws SQLException {
         List<Map<String, Object>> rows = query(c, "SELECT a.*, c.name AS customer_name, c.customer_type FROM loan_application a "
                 + "JOIN customer c ON c.customer_id = a.customer_id WHERE a.application_id = ?", id);
@@ -684,6 +797,7 @@ public class LoanService {
         return m;
     }
 
+    // 融資の内容に返済予定表・延滞額・次回返済などの表示用の項目を加えて返す
     private Map<String, Object> loanView(Connection c, long loanId) throws SQLException {
         List<Map<String, Object>> rows = query(c, "SELECT l.*, c.name AS customer_name FROM loan l "
                 + "JOIN customer c ON c.customer_id = l.customer_id WHERE l.loan_id = ?", loanId);
@@ -720,24 +834,28 @@ public class LoanService {
         return m;
     }
 
+    // 申込行を FOR UPDATE で取得する（状態遷移を直列化する）
     private static Map<String, Object> lockApplication(Connection c, long id) throws SQLException {
         List<Map<String, Object>> rows = query(c, "SELECT * FROM loan_application WHERE application_id = ? FOR UPDATE", id);
         if (rows.isEmpty()) throw new BankException(ErrorCode.LOAN_NOT_FOUND, String.valueOf(id));
         return rows.get(0);
     }
 
+    // 融資行を FOR UPDATE で取得する（返済・借入・夜間バッチが同じ融資を同時に更新しないように）
     private static Map<String, Object> lockLoan(Connection c, long id) throws SQLException {
         List<Map<String, Object>> rows = query(c, "SELECT * FROM loan WHERE loan_id = ? FOR UPDATE", id);
         if (rows.isEmpty()) throw new BankException(ErrorCode.LOAN_NOT_FOUND, String.valueOf(id));
         return rows.get(0);
     }
 
+    // 許可された状態でなければ LOAN_STATE_INVALID（状態遷移の誤りを防ぐ）
     private static void requireStatus(Map<String, Object> row, String... allowed) {
         Object st = row.get("status");
         for (String a : allowed) if (a.equals(st)) return;
         throw new BankException(ErrorCode.LOAN_STATE_INVALID, String.valueOf(st));
     }
 
+    // 融資側の取引履歴を 1 件追加する
     private static void loanTx(Connection c, long loanId, String type, BigDecimal principal, BigDecimal interest,
                                BigDecimal lateFee, BigDecimal outstandingAfter, String accountNo, String memo, String by,
                                LocalDateTime now) throws SQLException {
@@ -746,6 +864,7 @@ public class LoanService {
                 loanId, type, principal, interest, lateFee, outstandingAfter, accountNo, memo, by, now);
     }
 
+    // 商品コードの表示名（明細の摘要に使う）
     static String productLabel(String product) {
         switch (product) {
             case "HOUSING": return "住宅ローン";
@@ -757,16 +876,19 @@ public class LoanService {
         }
     }
 
+    // Map から取り出した数値を BigDecimal にそろえる（DB によって型が違っても扱えるように。null は 0）
     static BigDecimal num(Object v) {
         if (v == null) return BigDecimal.ZERO;
         if (v instanceof BigDecimal) return (BigDecimal) v;
         return new BigDecimal(v.toString());
     }
 
+    // 列長を超える値を切り詰める
     private static String clip(String s, int max) {
         return s == null || s.length() <= max ? s : s.substring(0, max);
     }
 
+    // 現在は使っていない（金利の表示形式を変える場合のために残している）
     @SuppressWarnings("unused")
     private static BigDecimal percent(BigDecimal v) { return v.multiply(HUNDRED); }
 }

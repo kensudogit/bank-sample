@@ -12,10 +12,13 @@ import org.apache.struts2.interceptor.parameter.StrutsParameter;
 public class CashAction extends MoneyOperationAction {
     private String accountNo;
 
+    /** Struts が使う既定コンストラクタ。 */
     public CashAction() { this(BankService.getDefault()); }
 
+    /** @param service 業務サービス（テスト用） */
     public CashAction(BankService service) { super(service); }
 
+    /** 口座番号を検証し、金額・摘要・冪等キーは親クラスで検証する。 */
     @Override
     public void validate() {
         accountNo = InputRules.trim(accountNo);
@@ -23,6 +26,11 @@ public class CashAction extends MoneyOperationAction {
         super.validate();
     }
 
+    /**
+     * 入金する。
+     *
+     * @return success、または業務エラーの結果名
+     */
     public String deposit() {
         try {
             return ok(service.deposit(accountNo, amountValue(), getMemo(), getIdempotencyKey()));
@@ -31,6 +39,11 @@ public class CashAction extends MoneyOperationAction {
         }
     }
 
+    /**
+     * 出金する（残高不足・限度額超過は 422）。
+     *
+     * @return success、または業務エラーの結果名
+     */
     public String withdraw() {
         try {
             return ok(service.withdraw(accountNo, amountValue(), getMemo(), getIdempotencyKey()));
@@ -39,11 +52,14 @@ public class CashAction extends MoneyOperationAction {
         }
     }
 
+    /** @return 口座番号 */
     public String getAccountNo() { return accountNo; }
 
+    /** @return 監査ログの対象（口座番号と金額） */
     @Override
     public String getAuditTarget() { return accountNo + " " + getAmount(); }
 
+    /** @param accountNo 口座番号 */
     @StrutsParameter
     public void setAccountNo(String accountNo) { this.accountNo = accountNo; }
 }

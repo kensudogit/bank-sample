@@ -35,6 +35,14 @@ public class ProductRepository {
         }
     }
 
+    /**
+     * 基準日時点の定期預金金利（期間別）を返す。
+     *
+     * @param c    DB 接続
+     * @param asOf 基準日
+     * @return 期間と金利の一覧
+     * @throws SQLException DB アクセスに失敗した場合
+     */
     public List<Map<String, Object>> timeDepositRates(Connection c, LocalDate asOf) throws SQLException {
         return query(c, "SELECT r.term_months, r.annual_rate FROM time_deposit_rate r WHERE r.effective_from = "
                 + "(SELECT MAX(x.effective_from) FROM time_deposit_rate x WHERE x.term_months = r.term_months "
@@ -53,6 +61,20 @@ public class ProductRepository {
         }
     }
 
+    /**
+     * 定期預金の契約を登録する（金利は預入時点の値で固定する）。
+     *
+     * @param c               DB 接続
+     * @param accountNo       定期預金の口座番号
+     * @param principal       元本
+     * @param rate            約定金利
+     * @param termMonths      期間（月数）
+     * @param start           預入日
+     * @param maturity        満期日
+     * @param instruction     満期時の取扱い（PAYOUT / ROLLOVER）
+     * @param linkedAccountNo 資金の出し手・満期時の払出し先の口座
+     * @throws SQLException DB アクセスに失敗した場合
+     */
     public void insertTimeDeposit(Connection c, String accountNo, BigDecimal principal, BigDecimal rate, int termMonths,
                                   LocalDate start, LocalDate maturity, String instruction, String linkedAccountNo)
             throws SQLException {
@@ -62,11 +84,27 @@ public class ProductRepository {
                 linkedAccountNo);
     }
 
+    /**
+     * 定期預金の契約を行ロック付きで取得する（中途解約と満期処理が同時に走らないように）。
+     *
+     * @param c         DB 接続
+     * @param accountNo 口座番号
+     * @return 契約（存在しなければ null）
+     * @throws SQLException DB アクセスに失敗した場合
+     */
     public Map<String, Object> lockTimeDeposit(Connection c, String accountNo) throws SQLException {
         List<Map<String, Object>> rows = query(c, "SELECT * FROM time_deposit WHERE account_no = ? FOR UPDATE", accountNo);
         return rows.isEmpty() ? null : rows.get(0);
     }
 
+    /**
+     * 定期預金の契約を取得する（照会用）。
+     *
+     * @param c         DB 接続
+     * @param accountNo 口座番号
+     * @return 契約（存在しなければ null）
+     * @throws SQLException DB アクセスに失敗した場合
+     */
     public Map<String, Object> findTimeDeposit(Connection c, String accountNo) throws SQLException {
         List<Map<String, Object>> rows = query(c, "SELECT * FROM time_deposit WHERE account_no = ?", accountNo);
         return rows.isEmpty() ? null : rows.get(0);
@@ -82,6 +120,17 @@ public class ProductRepository {
         return list;
     }
 
+    /**
+     * 自動継続: 元本・金利・期間を新しい値にして契約を更新する。
+     *
+     * @param c         DB 接続
+     * @param accountNo 口座番号
+     * @param principal 継続後の元本（元利継続なら利息を含む）
+     * @param rate      継続時点の金利
+     * @param start     継続日
+     * @param maturity  次の満期日
+     * @throws SQLException DB アクセスに失敗した場合
+     */
     public void rolloverTimeDeposit(Connection c, String accountNo, BigDecimal principal, BigDecimal rate,
                                     LocalDate start, LocalDate maturity) throws SQLException {
         execute(c, "UPDATE time_deposit SET principal = ?, annual_rate = ?, start_date = ?, maturity_date = ?, "
@@ -89,12 +138,27 @@ public class ProductRepository {
                 principal, rate, Date.valueOf(start), Date.valueOf(maturity), accountNo);
     }
 
+    /**
+     * 定期預金の状態を変更する。
+     *
+     * @param c         DB 接続
+     * @param accountNo 口座番号
+     * @param status    新しい状態
+     * @throws SQLException DB アクセスに失敗した場合
+     */
     public void setTimeDepositStatus(Connection c, String accountNo, String status) throws SQLException {
         execute(c, "UPDATE time_deposit SET status = ? WHERE account_no = ?", status, accountNo);
     }
 
     // ---------- FX rates ----------
 
+    /**
+     * 為替レート一覧（仲値 TTM、売値 TTS = TTM + スプレッド、買値 TTB = TTM - スプレッド）。
+     *
+     * @param c DB 接続
+     * @return 通貨ごとのレート
+     * @throws SQLException DB アクセスに失敗した場合
+     */
     public List<Map<String, Object>> fxRates(Connection c) throws SQLException {
         return query(c, "SELECT currency, ttm, spread, ttm + spread AS tts, ttm - spread AS ttb, updated_at, updated_by "
                 + "FROM fx_rate ORDER BY currency");
@@ -110,6 +174,18 @@ public class ProductRepository {
         }
     }
 
+    /**
+     * 為替レートを更新する。
+     *
+     * @param c        DB 接続
+     * @param currency 通貨
+     * @param ttm      仲値
+     * @param spread   片側スプレッド
+     * @param by       更新した行員
+     * @param now      更新日時
+     * @return 更新件数（0 なら未登録の通貨）
+     * @throws SQLException DB アクセスに失敗した場合
+     */
     public int updateFxRate(Connection c, String currency, BigDecimal ttm, BigDecimal spread, String by,
                             LocalDateTime now) throws SQLException {
         return execute(c, "UPDATE fx_rate SET ttm = ?, spread = ?, updated_at = ?, updated_by = ? WHERE currency = ?",
@@ -142,6 +218,15 @@ public class ProductRepository {
         }
     }
 
+    /**
+     * 更新系 SQL を実行する。
+     *
+     * @param c      DB 接続
+     * @param sql    SQL（値は ? で渡す）
+     * @param params バインドする値
+     * @return 更新件数
+     * @throws SQLException DB アクセスに失敗した場合
+     */
     public static int execute(Connection c, String sql, Object... params) throws SQLException {
         try (PreparedStatement ps = c.prepareStatement(sql)) {
             bind(ps, params);
@@ -153,6 +238,7 @@ public class ProductRepository {
     private static void bind(PreparedStatement ps, Object[] params) throws SQLException {
         for (int i = 0; i < params.length; i++) {
             Object p = params[i];
+            // setObject(null) は型が分からず失敗するドライバーがあるため、型を指定して NULL を設定する
             if (p == null) ps.setNull(i + 1, java.sql.Types.VARCHAR);
             else if (p instanceof LocalDateTime) ps.setTimestamp(i + 1, Timestamp.valueOf((LocalDateTime) p));
             else if (p instanceof LocalDate) ps.setDate(i + 1, Date.valueOf((LocalDate) p));
@@ -172,6 +258,7 @@ public class ProductRepository {
         }
     }
 
+    // JDBC の値を JSON に出しやすい型（文字列・BigDecimal）にそろえる。Oracle と H2 で返る型が違っても同じ結果にする
     private static Object value(Object v, String typeName, int scale) throws SQLException {
         // Oracle DATE comes back as a Timestamp, and H2 (Oracle mode) reports DATE as TIMESTAMP(0):
         // a timestamp column without fractional seconds is a date in this schema (TIMESTAMP columns have scale 6)
@@ -198,6 +285,7 @@ public class ProductRepository {
         return v;
     }
 
+    // 列名（snake_case）を JSON のキー（camelCase）に変換する。例: account_no → accountNo
     private static String camel(String column) {
         String lower = column.toLowerCase();
         StringBuilder sb = new StringBuilder();

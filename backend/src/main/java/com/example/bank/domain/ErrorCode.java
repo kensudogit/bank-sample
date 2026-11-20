@@ -2,6 +2,7 @@ package com.example.bank.domain;
 
 /** API エラーコード。resultName は struts.xml の global-results（HTTP ステータス）に対応。 */
 public enum ErrorCode {
+    // 列挙子の引数は struts.xml の結果名。末尾のコメントは対応する HTTP ステータス
     VALIDATION_ERROR("badRequest"),               // 400
     PASSWORD_POLICY("badRequest"),                // 400
     UNAUTHENTICATED("unauthorized"),              // 401
@@ -50,8 +51,10 @@ public enum ErrorCode {
 
     private final String resultName;
 
+    /** @param resultName struts.xml の global-results の結果名 */
     ErrorCode(String resultName) { this.resultName = resultName; }
 
+    /** @return Struts の結果名（HTTP ステータスの選択に使う） */
     public String resultName() { return resultName; }
 
     /** messages.properties のキー */

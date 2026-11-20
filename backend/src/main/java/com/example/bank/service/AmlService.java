@@ -37,11 +37,17 @@ import static com.example.bank.repository.ProductRepository.query;
  * アラートは OPEN → INVESTIGATING → CLOSED（問題なし）/ REPORTED（疑わしい取引の届出）。
  */
 public class AmlService {
+    /** 大口現金取引の基準額（円） */
     public static final BigDecimal LARGE_CASH = new BigDecimal("2000000");
+    /** 分割入金（ストラクチャリング）として数える 1 回の下限額（円） */
     public static final BigDecimal STRUCT_MIN = new BigDecimal("500000");
+    /** 短期間の資金移動として検査する出金額の下限（円） */
     public static final BigDecimal RAPID_MIN = new BigDecimal("1000000");
+    /** 海外送金の報告対象額（円相当） */
     public static final BigDecimal FOREIGN_REPORT = new BigDecimal("1000000");
+    /** 制裁リストに該当とみなす名前の類似度 */
     public static final double NAME_MATCH = 0.85;
+    // 1 回の検査件数の上限（大量の未検査明細があっても 1 トランザクションを長くしない。残りは次回に続きから）
     private static final int SCAN_BATCH = 5000;
 
     private static final AmlService DEFAULT = new AmlService(DataSources::bank, Clock.systemDefaultZone());
@@ -49,11 +55,16 @@ public class AmlService {
     private final Supplier<DataSource> dataSource;
     private final Clock clock;
 
+    /**
+     * @param dataSource 接続の取得元
+     * @param clock      アラート作成日時の取得元
+     */
     public AmlService(Supplier<DataSource> dataSource, Clock clock) {
         this.dataSource = dataSource;
         this.clock = clock;
     }
 
+    /** @return アプリケーション既定のインスタンス */
     public static AmlService getDefault() { return DEFAULT; }
 
     // ===================== monitoring =====================
@@ -61,6 +72,7 @@ public class AmlService {
     /** 前回の続きから新しい取引を検査し、作成したアラート件数を返す。 */
     public Map<String, Object> scan() {
         return Transactions.inTransaction(dataSource.get(), c -> {
+            // どこまで検査したかを 1 行のカーソルで管理する。FOR UPDATE で、複数インスタンスが同時に同じ範囲を検査するのを防ぐ
             long last = LoanService.num(query(c, "SELECT last_tx_id FROM aml_cursor WHERE cursor_id = 1 FOR UPDATE")
                     .get(0).get("lastTxId")).longValue();
             List<Map<String, Object>> txs = query(c, "SELECT t.tx_id, t.account_no, t.tx_type, t.amount, t.created_at, "
@@ -71,9 +83,11 @@ public class AmlService {
             for (Map<String, Object> t : txs) {
                 long id = LoanService.num(t.get("txId")).longValue();
                 max = Math.max(max, id);
+                // 基準額は円で定めているため、外貨口座の明細は対象外（外貨は海外送金時の照合で確認する）
                 if (!"JPY".equals(t.get("currency"))) continue;
                 created += checkTransaction(c, t, id);
             }
+            // アラート作成とカーソル更新は同じトランザクション。途中で失敗すれば両方戻り、次回同じ範囲を検査し直す
             execute(c, "UPDATE aml_cursor SET last_tx_id = ? WHERE cursor_id = 1", max);
             Map<String, Object> m = new LinkedHashMap<>();
             m.put("scanned", txs.size());
@@ -83,6 +97,7 @@ public class AmlService {
         });
     }
 
+    // 明細 1 件をルールごとに検査し、作成したアラート件数を返す
     private int checkTransaction(Connection c, Map<String, Object> t, long txId) throws SQLException {
         String type = (String) t.get("txType");
         String accountNo = (String) t.get("accountNo");
@@ -102,6 +117,7 @@ public class AmlService {
             int count = LoanService.num(agg.get("n")).intValue();
             BigDecimal total = LoanService.num(agg.get("total"));
             if (count >= 3 && total.compareTo(LARGE_CASH) >= 0) {
+                // 参照を「口座 + 日付」にして、同じ日の分割入金で何件もアラートを作らない
                 n += alert(c, "STRUCTURING", customerId, accountNo, "STRUCT:" + accountNo + ":" + at.toLocalDate(), 75,
                         String.format("7 日以内に 50〜200 万円未満の現金入金 %d 回・合計 %,d 円", count, total.longValue()));
             }
@@ -110,6 +126,7 @@ public class AmlService {
         if (outflow && amount.compareTo(RAPID_MIN) >= 0) {
             BigDecimal inflow = LoanService.num(query(c, "SELECT COALESCE(SUM(amount), 0) AS v FROM account_transaction "
                     + "WHERE account_no = ? AND tx_type IN ('DEPOSIT', 'TRANSFER_IN', 'REMIT_IN') AND created_at >= ? "
+                    // tx_id < 今回の明細 で「この出金より前の入金」だけを数える（同時刻の明細でも順序が決まる）
                     + "AND tx_id < ?", accountNo, at.minusDays(2), txId).get(0).get("v"));
             if (inflow.compareTo(RAPID_MIN) >= 0 && amount.compareTo(inflow.multiply(new BigDecimal("0.9"))) >= 0) {
                 n += alert(c, "RAPID_MOVEMENT", customerId, accountNo, "RAPID:" + txId, 65,
@@ -123,6 +140,7 @@ public class AmlService {
 
     /** 制裁リスト・高リスク国の照合結果。 */
     public static final class Screening {
+        // 結果を返すための単純な入れ物（フィールドは呼び出し側が読むだけ）
         public boolean hit;
         public int score;
         public String rule;
@@ -134,6 +152,7 @@ public class AmlService {
         Screening s = new Screening();
         double best = 0;
         String bestName = null;
+        // リスト全件と比較して最も似ている名前を探す（サンプルの件数が少ない前提。実運用では専用の照合エンジンを使う）
         for (Map<String, Object> e : query(c, "SELECT name, list_name FROM sanctions_list")) {
             double sim = nameSimilarity(beneficiaryName, (String) e.get("name"));
             if (sim > best) {
@@ -146,6 +165,7 @@ public class AmlService {
             s.score = (int) Math.round(best * 100);
             s.rule = "SANCTIONS";
             s.detail = String.format("制裁リスト該当の可能性: %s 類似度 %.2f", bestName, best);
+            // 制裁リストに該当した場合は、高リスク国の判定より優先して返す
             return s;
         }
         List<Map<String, Object>> risk = query(c, "SELECT name FROM high_risk_country WHERE country = ?", country);
@@ -177,6 +197,7 @@ public class AmlService {
         return Math.max(jaccard, lev);
     }
 
+    // 大文字にそろえて記号を除き、法人格・敬称（LLC, MR など）を外して単語の一覧にする
     private static List<String> tokens(String s) {
         if (s == null) return new ArrayList<>();
         String norm = s.toUpperCase(Locale.ROOT).replaceAll("[^A-Z0-9 ]", " ").trim();
@@ -187,12 +208,20 @@ public class AmlService {
         return list;
     }
 
+    // 語順の違い（姓名の順など）を吸収するため、単語をアルファベット順に並べ替える
     private static List<String> sorted(List<String> l) {
         List<String> copy = new ArrayList<>(l);
         java.util.Collections.sort(copy);
         return copy;
     }
 
+    /**
+     * 編集距離（挿入・削除・置換の最小回数）。メモリを節約するため 2 行分の配列だけで計算する。
+     *
+     * @param a 文字列 1
+     * @param b 文字列 2
+     * @return 編集距離
+     */
     static int levenshtein(String a, String b) {
         int[] prev = new int[b.length() + 1];
         int[] cur = new int[b.length() + 1];
@@ -215,6 +244,7 @@ public class AmlService {
     /** アラートを作る（同じルール・参照は 1 件だけ）。作成した場合 1。 */
     int alert(Connection c, String rule, String customerId, String accountNo, String reference, int score, String detail)
             throws SQLException {
+        // 同じルール・同じ参照のアラートは 1 件だけにする（検査し直しても重複して作らない）
         if (!query(c, "SELECT 1 FROM aml_alert WHERE rule_code = ? AND reference = ?", rule, reference).isEmpty()) return 0;
         LocalDateTime now = LocalDateTime.now(clock);
         execute(c, "INSERT INTO aml_alert (rule_code, customer_id, account_no, reference, score, detail, status, created_at, "
@@ -223,6 +253,12 @@ public class AmlService {
         return 1;
     }
 
+    /**
+     * アラート一覧（新しい順に最大 200 件）。
+     *
+     * @param status 状態での絞り込み（null は全件）
+     * @return アラート一覧
+     */
     public List<Map<String, Object>> listAlerts(String status) {
         return Transactions.readOnly(dataSource.get(), c -> status == null
                 ? query(c, "SELECT a.*, c.name AS customer_name FROM aml_alert a LEFT JOIN customer c ON c.customer_id = a.customer_id "
@@ -240,9 +276,11 @@ public class AmlService {
             throw new BankException(ErrorCode.VALIDATION_ERROR);
         }
         return Transactions.inTransaction(dataSource.get(), c -> {
+            // 行ロックしてから状態を確かめ、2 人が同時に完了処理をして結果が上書きされるのを防ぐ
             List<Map<String, Object>> rows = query(c, "SELECT * FROM aml_alert WHERE alert_id = ? FOR UPDATE", alertId);
             if (rows.isEmpty()) throw new BankException(ErrorCode.ALERT_NOT_FOUND, String.valueOf(alertId));
             String current = (String) rows.get(0).get("status");
+            // 完了したアラートは再オープンさせない（判断の記録を変えられないようにする）
             if ("CLOSED".equals(current) || "REPORTED".equals(current)) {
                 throw new BankException(ErrorCode.VALIDATION_ERROR);
             }

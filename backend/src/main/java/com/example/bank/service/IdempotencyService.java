@@ -28,25 +28,33 @@ import static com.example.bank.repository.ProductRepository.query;
  */
 public class IdempotencyService {
     private static final Logger LOG = LogManager.getLogger(IdempotencyService.class);
+    // Struts の Action は DI なしで生成されるため、既定のインスタンスを static に持つ（テストでは別の DataSource・時計で生成する）
     private static final IdempotencyService DEFAULT = new IdempotencyService(DataSources::bank, Clock.systemDefaultZone());
 
     private final Supplier<DataSource> dataSource;
     private final Clock clock;
 
+    /**
+     * @param dataSource 接続の取得元（JNDI の解決を初回利用時まで遅らせるため Supplier で受け取る）
+     * @param clock      完了日時の記録に使う時計（テストで固定できるように）
+     */
     public IdempotencyService(Supplier<DataSource> dataSource, Clock clock) {
         this.dataSource = dataSource;
         this.clock = clock;
     }
 
+    /** @return アプリケーション既定のインスタンス */
     public static IdempotencyService getDefault() { return DEFAULT; }
 
     /** 結果を保存する（成功時のみ。業務トランザクションのコミット後に別トランザクションで）。 */
     public void saveResult(String key, String fingerprint, String json) {
         try {
+            // completed_at IS NULL の条件で、最初に保存した結果を後から上書きしない
             Transactions.inTransaction(dataSource.get(), c -> execute(c, "UPDATE operation_request SET fingerprint = ?, "
                     + "result_json = ?, completed_at = ? WHERE idempotency_key = ? AND completed_at IS NULL",
                     clip(fingerprint), json, LocalDateTime.now(clock), key));
         } catch (RuntimeException e) {
+            // 業務処理はコミット済みなので、ここで例外にすると成功した操作が失敗に見えてしまう。ログだけ残して応答は成功のまま返す
             // The operation itself is committed; without a stored result a retry gets "processing" instead of a replay
             LOG.error("failed to store idempotent result for key {}", key, e);
         }
@@ -57,11 +65,13 @@ public class IdempotencyService {
         return Transactions.readOnly(dataSource.get(), c -> {
             List<Map<String, Object>> rows = query(c, "SELECT fingerprint, result_json, completed_at FROM operation_request "
                     + "WHERE idempotency_key = ?", key);
+            // 行がない、または結果未保存（completed_at が null = 先の要求がまだ処理中）なら null
             if (rows.isEmpty() || rows.get(0).get("completedAt") == null) return null;
             return new String[]{(String) rows.get(0).get("fingerprint"), (String) rows.get(0).get("resultJson")};
         });
     }
 
+    // 指紋は列長（200 文字）に収まるよう切り詰める
     private static String clip(String s) {
         return s == null || s.length() <= 200 ? s : s.substring(0, 200);
     }

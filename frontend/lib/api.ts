@@ -14,6 +14,8 @@ import type {
   DormancyReport,
   IdDocType,
   InterestResult,
+  LedgerTraceItem,
+  LedgerVerification,
   OperationResult,
   SettlementSummary,
   TransactionPage,
@@ -186,6 +188,8 @@ export const bankApi = {
   auditLog: (q: AuditQuery) =>
     request<Page<AuditEntry>>(`/audit-log${qs({ ...q })}`),
   auditVerify: () => request<AuditVerification>("/audit-verify"),
+  ledgerVerify: (accountNo?: string) => request<LedgerVerification>(`/ledger-verify${qs({ accountNo })}`),
+  ledgerTrace: (accountNo: string) => request<LedgerTraceItem[]>(`/ledger-trace${qs({ accountNo })}`),
   jobs: () => request<JobsInfo>("/jobs"),
   runJobs: () => mutate(request<string[]>("/jobs-run", {})),
 };

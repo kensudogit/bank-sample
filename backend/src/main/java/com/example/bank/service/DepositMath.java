@@ -10,10 +10,12 @@ public final class DepositMath {
     private static final BigDecimal HUNDRED = new BigDecimal("100");
     private static final BigDecimal DAYS_PER_YEAR = new BigDecimal("365");
 
+    // 計算用の static メソッドだけを持つためインスタンス化させない
     private DepositMath() {}
 
     /** 単利: 元本 × 年利% × 日数 ÷ 365、1 円未満切捨て。 */
     public static BigDecimal simpleInterest(BigDecimal principal, BigDecimal annualPercent, LocalDate from, LocalDate to) {
+        // 日数は預入日を含み満期日を含まない「片端」で数える
         long days = ChronoUnit.DAYS.between(from, to);
         if (days <= 0) return BigDecimal.ZERO;
         return principal.multiply(annualPercent).multiply(BigDecimal.valueOf(days))
@@ -30,6 +32,7 @@ public final class DepositMath {
         BigDecimal v = new BigDecimal(amount);
         int digits = minorDigits(currency);
         if (v.scale() > digits) throw new IllegalArgumentException("too many decimals");
+        // 端数が出ないことは上で確認済みなので、UNNECESSARY で「丸めが起きたら例外」にして黙った丸めを防ぐ
         return v.movePointRight(digits).setScale(0, RoundingMode.UNNECESSARY);
     }
 
@@ -44,6 +47,7 @@ public final class DepositMath {
      * @param foreignMinor 買う外貨額（セント）
      */
     public static BigDecimal yenToBuy(BigDecimal foreignMinor, String currency, BigDecimal tts) {
+        // 1 円未満は切り上げる（受け取る円が、渡す外貨の価値を下回らないようにする）
         return fromMinor(foreignMinor, currency).multiply(tts).setScale(0, RoundingMode.CEILING);
     }
 

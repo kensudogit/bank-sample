@@ -16,13 +16,16 @@ public class DormancyAction extends BaseApiAction {
     private String asOf;
     private LocalDate asOfDate;
 
+    /** Struts が使う既定コンストラクタ。 */
     public DormancyAction() { this(AccountLifecycleService.getDefault()); }
 
+    /** @param lifecycle 口座ライフサイクルサービス（テスト用） */
     public DormancyAction(AccountLifecycleService lifecycle) {
         super(BankService.getDefault());
         this.lifecycle = lifecycle;
     }
 
+    /** 基準日の形式を検証する（未指定なら本日）。 */
     @Override
     public void validate() {
         asOfDate = InputRules.toDate(InputRules.trim(asOf));
@@ -31,10 +34,20 @@ public class DormancyAction extends BaseApiAction {
         }
     }
 
+    /**
+     * 基準日時点の休眠管理対象を照会する（更新はしない）。
+     *
+     * @return success
+     */
     public String report() {
         return ok(lifecycle.dormancyReport(asOfDate));
     }
 
+    /**
+     * 休眠前通知の記録と休眠化を実行する（未来日は INVALID_BASE_DATE）。
+     *
+     * @return success、または業務エラーの結果名
+     */
     public String run() {
         try {
             return ok(lifecycle.runDormancy(asOfDate));
@@ -43,8 +56,10 @@ public class DormancyAction extends BaseApiAction {
         }
     }
 
+    /** @return 監査ログの対象（基準日） */
     @Override
     public String getAuditTarget() { return asOf == null ? "today" : asOf; }
 
+    /** @param asOf 基準日（yyyy-MM-dd） */
     @StrutsParameter public void setAsOf(String asOf) { this.asOf = asOf; }
 }

@@ -87,6 +87,7 @@ export const remitStatusLabel: Record<string, string> = {
   RETURNED: "返却・組戻し",
   CREDITED: "入金済",
   REJECTED: "謝絶",
+  DUPLICATE: "重複（取込済み）",
 };
 
 export const amlRuleLabel: Record<string, string> = {

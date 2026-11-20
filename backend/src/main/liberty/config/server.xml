@@ -8,6 +8,8 @@
     <feature>jsp-2.3</feature>
     <feature>jdbc-4.2</feature>
     <feature>jndi-1.0</feature>
+    <!-- HTTP sessions are stored in Oracle so that any instance behind the load balancer can serve a logged-in user -->
+    <feature>sessionDatabase-1.0</feature>
   </featureManager>
 
   <httpEndpoint id="defaultHttpEndpoint" host="*" httpPort="9080" httpsPort="-1"/>
@@ -44,7 +46,21 @@
     path "/" so the browser also sends it through the Next.js proxy (/api/bank/*).
     Set cookieSecure="true" once the site is served over HTTPS.
   -->
-  <httpSession cookieName="BANKSESSION" cookieHttpOnly="true" cookieSameSite="Lax" cookiePath="/"
+  <!--
+    Session persistence (high availability): sessions are written to the BANK schema (table created by Liberty) at the
+    end of each request, so a request can go to another instance after a failure or restart without logging the user out.
+    It uses its own non-transactional data source, as Liberty recommends for session persistence.
+  -->
+  <dataSource id="sessionDS" jndiName="jdbc/sessionDS" type="javax.sql.DataSource" transactional="false">
+    <jdbcDriver libraryRef="oracleJdbcLib"/>
+    <properties.oracle URL="${env.BANK_DB_URL}" user="${env.BANK_DB_USER}" password="${env.BANK_DB_PASSWORD}"
+                       connectionProperties="oracle.net.CONNECT_TIMEOUT=5000"/>
+    <connectionManager minPoolSize="1" maxPoolSize="10" connectionTimeout="10s" purgePolicy="EntirePool"/>
+  </dataSource>
+  <httpSessionDatabase id="sessionDB" dataSourceRef="sessionDS" writeFrequency="END_OF_SERVLET_SERVICE"
+                       writeContents="ALL_SESSION_ATTRIBUTES" tableName="BANK_HTTP_SESSIONS"/>
+
+  <httpSession storageRef="sessionDB" cookieName="BANKSESSION" cookieHttpOnly="true" cookieSameSite="Lax" cookiePath="/"
                cookieSecure="false"/>
 
   <applicationManager autoExpand="true"/>

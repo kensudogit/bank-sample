@@ -34,7 +34,9 @@ import static com.example.bank.repository.ProductRepository.query;
  * 期待損失 EL = PD × LGD × EAD。不良債権比率 = 要管理先以下の残高 ÷ 総残高。
  */
 public class RiskService {
+    // 未使用枠の掛目（CCF）: 将来引き出される見込みの割合
     private static final BigDecimal CCF = new BigDecimal("0.5");
+    // デフォルト時損失率（LGD）: 担保でカバーされる部分 / 無担保部分
     private static final BigDecimal LGD_SECURED = new BigDecimal("0.10");
     private static final BigDecimal LGD_UNSECURED = new BigDecimal("0.45");
 
@@ -45,14 +47,25 @@ public class RiskService {
     private final CustomerRepository customers = new CustomerRepository();
     private final AccountRepository accounts = new AccountRepository();
 
+    /**
+     * @param dataSource 接続の取得元
+     * @param clock      基準日時の取得元
+     */
     public RiskService(Supplier<DataSource> dataSource, Clock clock) {
         this.dataSource = dataSource;
         this.clock = clock;
     }
 
+    /** @return アプリケーション既定のインスタンス */
     public static RiskService getDefault() { return DEFAULT; }
 
+    /**
+     * リスク管理ダッシュボード（信用・流動性・為替）。
+     *
+     * @return 集計結果
+     */
     public Map<String, Object> dashboard() {
+        // 3 つの集計を同じ接続で行う（ロックはしない参照のみ）
         return Transactions.readOnly(dataSource.get(), c -> {
             Map<String, Object> m = new LinkedHashMap<>();
             m.put("asOf", LocalDateTime.now(clock).withNano(0).toString());
@@ -63,6 +76,7 @@ public class RiskService {
         });
     }
 
+    // 信用リスク: 融資ごとに EAD・LGD・PD から期待損失を求め、格付・商品・債務者区分別に集計する
     private Map<String, Object> credit(Connection c) throws SQLException {
         List<Map<String, Object>> loans = query(c, "SELECT l.loan_id, l.customer_id, cu.name AS customer_name, l.product, "
                 + "l.outstanding, l.credit_limit, l.grade, l.borrower_class, l.repayment_account_no, l.application_id, "
@@ -82,12 +96,14 @@ public class RiskService {
         for (Map<String, Object> l : loans) {
             String product = (String) l.get("product");
             BigDecimal outstanding = "OVERDRAFT".equals(product)
+                    // 当座貸越の貸出残高は loan 表ではなく口座のマイナス残高で表す
                     ? LoanService.num(l.get("accountBalance")).negate().max(BigDecimal.ZERO)
                     : LoanService.num(l.get("outstanding"));
             BigDecimal limit = LoanService.num(l.get("creditLimit"));
             BigDecimal undrawn = limit.signum() > 0 ? limit.subtract(outstanding).max(BigDecimal.ZERO) : BigDecimal.ZERO;
             BigDecimal ead = outstanding.add(undrawn.multiply(CCF));
             BigDecimal collateral = LoanService.num(l.get("collateral"));
+            // 担保評価額のうち EAD を超える部分は回収に使えないので、担保でカバーされる額は EAD までとする
             BigDecimal secured = collateral.min(ead);
             BigDecimal lgdAmount = secured.multiply(LGD_SECURED).add(ead.subtract(secured).multiply(LGD_UNSECURED));
             String cls = (String) l.get("borrowerClass");
@@ -141,10 +157,12 @@ public class RiskService {
         }
     }
 
+    // 流動性: 預金（円換算）と貸出の比率、要求払い預金の割合、30 日以内に満期を迎える定期預金
     private Map<String, Object> liquidity(Connection c) throws SQLException {
         BigDecimal usd = ttm(c, "USD");
         BigDecimal eur = ttm(c, "EUR");
         List<Map<String, Object>> byType = query(c, "SELECT account_type, currency, COUNT(*) AS accounts, "
+                // 当座貸越のマイナス残高は預金ではなく貸出なので、預金の合計からは除く
                 + "COALESCE(SUM(CASE WHEN balance > 0 THEN balance ELSE 0 END), 0) AS balance FROM account "
                 + "WHERE status <> 'CLOSED' GROUP BY account_type, currency ORDER BY account_type, currency");
         BigDecimal deposits = BigDecimal.ZERO;
@@ -175,6 +193,7 @@ public class RiskService {
         return m;
     }
 
+    // 為替リスク: 外貨預金の残高（銀行にとっての外貨建て負債）と、円安 1% の場合の損益
     private Map<String, Object> fx(Connection c) throws SQLException {
         List<Map<String, Object>> rows = new ArrayList<>();
         for (String ccy : Arrays.asList("USD", "EUR")) {
@@ -202,6 +221,7 @@ public class RiskService {
     /** 顧客 360°: 基本情報、預金、融資、申込、口座振替、送金、接触履歴、預かり資産の合計と顧客区分。 */
     public Map<String, Object> customer360(String customerId) {
         return Transactions.readOnly(dataSource.get(), c -> {
+            // 閲覧そのものは Action 側（audit=true）で監査ログに記録される
             Customer customer = customers.findById(c, customerId)
                     .orElseThrow(() -> new BankException(ErrorCode.CUSTOMER_NOT_FOUND, customerId));
             Map<String, Object> m = new LinkedHashMap<>();
@@ -240,6 +260,16 @@ public class RiskService {
         });
     }
 
+    /**
+     * 顧客の応対メモを追加し、最新 100 件を返す。
+     *
+     * @param customerId 顧客番号
+     * @param type       メモの種類
+     * @param content    内容
+     * @param by         記録した行員
+     * @return 追加後のメモ一覧
+     * @throws BankException 顧客が見つからない場合
+     */
     public List<Map<String, Object>> addNote(String customerId, String type, String content, String by) {
         return Transactions.inTransaction(dataSource.get(), c -> {
             if (!customers.findById(c, customerId).isPresent()) throw new BankException(ErrorCode.CUSTOMER_NOT_FOUND, customerId);
@@ -252,11 +282,13 @@ public class RiskService {
 
     // ===================== helpers =====================
 
+    // 仲値（未登録の通貨は 0 として円換算を 0 にする）
     private static BigDecimal ttm(Connection c, String ccy) throws SQLException {
         List<Map<String, Object>> r = query(c, "SELECT ttm FROM fx_rate WHERE currency = ?", ccy);
         return r.isEmpty() ? BigDecimal.ZERO : LoanService.num(r.get(0).get("ttm"));
     }
 
+    // 集計の入れ物を、表示順を保つ LinkedHashMap で用意する
     private static Map<String, Map<String, Object>> bucket(List<String> keys) {
         Map<String, Map<String, Object>> m = new LinkedHashMap<>();
         for (String k : keys) {
@@ -271,6 +303,7 @@ public class RiskService {
         return m;
     }
 
+    // 集計の入れ物に 1 件分を加算する（想定外の区分値は無視する）
     private static void add(Map<String, Object> b, BigDecimal outstanding, BigDecimal ead, BigDecimal el) {
         if (b == null) return;
         b.put("count", (Integer) b.get("count") + 1);
@@ -279,6 +312,7 @@ public class RiskService {
         b.put("expectedLoss", ((BigDecimal) b.get("expectedLoss")).add(el));
     }
 
+    // 分母 0 のときは 0 を返す（0 除算を避ける）
     private static BigDecimal ratio(BigDecimal a, BigDecimal b) {
         return b.signum() == 0 ? BigDecimal.ZERO : a.divide(b, 4, RoundingMode.HALF_UP);
     }

@@ -22,12 +22,14 @@ import java.util.concurrent.Future;
 
 import static org.junit.jupiter.api.Assertions.*;
 
+/** 照会・入金・出金・振込の基本動作と、ロールバック・冪等性・排他制御のテスト（H2 / Oracle 互換モード）。 */
 class BankServiceTest {
     private static final Clock CLOCK = Clock.fixed(Instant.parse("2026-03-01T01:00:00Z"), ZoneId.of("Asia/Tokyo"));
 
     private TestDatabase db;
     private BankService service;
 
+    /** テストごとに新しいインメモリ DB を作る（テスト間で残高を共有しない）。 */
     @BeforeEach
     void setUp() {
         db = TestDatabase.create();
@@ -38,11 +40,13 @@ class BankServiceTest {
 
     private BigDecimal balance(String accountNo) { return service.getAccount(accountNo).getBalance(); }
 
+    // 業務例外が期待どおりのエラーコードで発生することを確かめる
     private static void assertError(ErrorCode expected, Executable call) {
         BankException e = assertThrows(BankException.class, call);
         assertEquals(expected, e.getCode());
     }
 
+    /** 初期データの口座が名義人名付きで一覧できる。 */
     @Test
     void listsSeededAccountsWithCustomerNames() {
         List<Account> accounts = service.listAccounts();
@@ -52,6 +56,7 @@ class BankServiceTest {
         assertEquals(0, new BigDecimal("1250000").compareTo(accounts.get(0).getBalance()));
     }
 
+    /** 入金で残高が増え、明細が記録される。 */
     @Test
     void depositIncreasesBalanceAndRecordsHistory() {
         OperationResult r = service.deposit("1000003", new BigDecimal("20000"), "給与", key());
@@ -64,17 +69,20 @@ class BankServiceTest {
         assertEquals("給与", latest.getMemo());
     }
 
+    /** 残高不足の出金は拒否され、冪等キーの登録も含めて全体がロールバックされる。 */
     @Test
     void withdrawWithInsufficientFundsIsRejectedAndRolledBack() {
         String k = key();
         assertError(ErrorCode.INSUFFICIENT_FUNDS,
                 () -> service.withdraw("1000004", new BigDecimal("120001"), null, k));
         assertEquals(0, new BigDecimal("120000").compareTo(balance("1000004")));
+        // 冪等キーの登録もロールバックされたので、修正した要求で同じキーを使える
         // The idempotency key was rolled back too, so the corrected request can reuse it
         service.withdraw("1000004", new BigDecimal("120000"), null, k);
         assertEquals(0, BigDecimal.ZERO.compareTo(balance("1000004")));
     }
 
+    /** 振込は 2 口座の残高を同時に更新し、出金側・入金側の両方の明細を記録する。 */
     @Test
     void transferMovesMoneyAtomicallyAndRecordsBothSides() {
         OperationResult r = service.transfer("1000001", "1000003", new BigDecimal("250000"), "家賃", key());
@@ -90,6 +98,7 @@ class BankServiceTest {
         assertEquals("1000001", in.getCounterpartyAccountNo());
     }
 
+    /** 口座詳細は口座と最新の明細を 1 回の呼び出しで返す。 */
     @Test
     void accountDetailReturnsAccountAndNewestTransactionsInOneCall() {
         service.deposit("1000004", new BigDecimal("1000"), "1回目", key());
@@ -104,6 +113,7 @@ class BankServiceTest {
         assertError(ErrorCode.ACCOUNT_NOT_FOUND, () -> service.getAccountDetail("9999999"));
     }
 
+    /** 直近明細は新しい順で、件数の上限で打ち切られる。 */
     @Test
     void historyIsCappedAtLimitNewestFirst() {
         for (int i = 0; i < BankService.HISTORY_LIMIT + 5; i++) {
@@ -114,6 +124,7 @@ class BankServiceTest {
         assertTrue(history.get(0).getTxId() > history.get(history.size() - 1).getTxId());
     }
 
+    /** 同じ冪等キーの 2 回目は DUPLICATE_REQUEST になり、二重に記帳されない。 */
     @Test
     void duplicateIdempotencyKeyIsRejected() {
         String k = key();
@@ -122,6 +133,7 @@ class BankServiceTest {
         assertEquals(0, new BigDecimal("1251000").compareTo(balance("1000001")));
     }
 
+    /** 取引可能（ACTIVE）でない口座では取引できない。 */
     @Test
     void frozenAccountCannotTransact() {
         assertError(ErrorCode.ACCOUNT_NOT_ACTIVE,
@@ -131,6 +143,7 @@ class BankServiceTest {
         assertEquals(0, new BigDecimal("1250000").compareTo(balance("1000001")));
     }
 
+    /** 不正な要求（0 円・小数・上限超過・同じ口座・存在しない口座など）を拒否する。 */
     @Test
     void rejectsInvalidRequests() {
         assertError(ErrorCode.SAME_ACCOUNT,
@@ -146,6 +159,10 @@ class BankServiceTest {
         assertError(ErrorCode.ACCOUNT_NOT_FOUND, () -> service.getAccount("9999999"));
     }
 
+    /**
+     * 逆方向の振込を同時に大量に実行しても、合計残高が保たれデッドロックしない
+     * （口座番号順にロックしているため）。
+     */
     @Test
     void concurrentOppositeTransfersKeepTotalAndDoNotDeadlock() throws Exception {
         BigDecimal before = balance("1000001").add(balance("1000003"));
@@ -158,6 +175,7 @@ class BankServiceTest {
                         ? service.transfer("1000001", "1000003", new BigDecimal("1000"), null, key())
                         : service.transfer("1000003", "1000001", new BigDecimal("700"), null, key())));
             }
+            // get() で各スレッドの例外（デッドロック検出によるエラーなど）をテストの失敗として受け取る
             for (Future<?> f : futures) f.get();
         } finally {
             pool.shutdownNow();

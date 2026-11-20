@@ -72,6 +72,7 @@
       <result name="methodNotAllowed" type="json"><param name="root">response</param><param name="statusCode">405</param></result>
       <result name="conflict" type="json"><param name="root">response</param><param name="statusCode">409</param></result>
       <result name="unprocessable" type="json"><param name="root">response</param><param name="statusCode">422</param></result>
+      <result name="unavailable" type="json"><param name="root">response</param><param name="statusCode">503</param></result>
       <result name="systemError" type="json"><param name="root">systemErrorResponse</param><param name="statusCode">500</param></result>
     </global-results>
 
@@ -81,6 +82,9 @@
 
     <!-- ===== Public ===== -->
     <action name="health" class="com.example.bank.action.HealthAction">
+      <interceptor-ref name="apiReadStack"><param name="apiGuardRead.roles">PUBLIC</param></interceptor-ref>
+    </action>
+    <action name="live" class="com.example.bank.action.HealthAction" method="live">
       <interceptor-ref name="apiReadStack"><param name="apiGuardRead.roles">PUBLIC</param></interceptor-ref>
     </action>
     <action name="me" class="com.example.bank.action.AuthAction" method="me">
@@ -298,6 +302,14 @@
     <action name="foreign-remittance" class="com.example.bank.action.PaymentAction" method="foreignGet"/>
     <action name="foreign-decide" class="com.example.bank.action.PaymentAction" method="foreignDecide">
       <interceptor-ref name="apiWriteStack"><param name="apiGuardWrite.roles">SUPERVISOR</param></interceptor-ref>
+    </action>
+
+    <!-- ===== Ledger integrity / traceability ===== -->
+    <action name="ledger-verify" class="com.example.bank.action.AdminAction" method="ledgerVerify">
+      <interceptor-ref name="apiReadStack"><param name="apiGuardRead.roles">SUPERVISOR</param><param name="apiGuardRead.audit">true</param></interceptor-ref>
+    </action>
+    <action name="ledger-trace" class="com.example.bank.action.AdminAction" method="ledgerTrace">
+      <interceptor-ref name="apiReadStack"><param name="apiGuardRead.roles">TELLER,SUPERVISOR</param><param name="apiGuardRead.audit">true</param></interceptor-ref>
     </action>
 
     <!-- ===== Risk / AML / CRM ===== -->
