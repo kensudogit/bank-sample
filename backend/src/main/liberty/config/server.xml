@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- IBM WebSphere Application Server Liberty configuration for the bank API -->
+<server description="bank-api">
+
+  <featureManager>
+    <feature>servlet-4.0</feature>
+    <!-- Struts 2 core references the JSP API (javax.servlet.jsp) at startup even for JSON-only actions -->
+    <feature>jsp-2.3</feature>
+    <feature>jdbc-4.2</feature>
+    <feature>jndi-1.0</feature>
+  </featureManager>
+
+  <httpEndpoint id="defaultHttpEndpoint" host="*" httpPort="9080" httpsPort="-1"/>
+
+  <!-- Oracle JDBC driver (copied by the Dockerfile from the Gradle 'copyJdbcDriver' task) -->
+  <library id="oracleJdbcLib">
+    <fileset dir="${shared.resource.dir}/jdbc" includes="ojdbc*.jar"/>
+  </library>
+
+  <!-- Container-managed connection pool, looked up by the application as jdbc/bankDS -->
+  <!--
+    statementCacheSize: keeps every prepared SQL of the app (about 8) parsed per connection (default is 10)
+    queryTimeout:       a statement stuck on a row lock or a slow DB releases its pooled connection instead of
+                        holding it until all connections are exhausted
+  -->
+  <dataSource id="bankDS" jndiName="jdbc/bankDS" type="javax.sql.DataSource" isolationLevel="TRANSACTION_READ_COMMITTED"
+              statementCacheSize="30" queryTimeout="30s">
+    <jdbcDriver libraryRef="oracleJdbcLib"/>
+    <!-- Fail fast when the DB host is unreachable instead of hanging request threads -->
+    <properties.oracle URL="${env.BANK_DB_URL}" user="${env.BANK_DB_USER}" password="${env.BANK_DB_PASSWORD}"
+                       connectionProperties="oracle.net.CONNECT_TIMEOUT=5000"/>
+    <!--
+      minPoolSize: warm connections so the first requests after start / idle periods skip the Oracle logon
+      purgePolicy: after a DB restart, drop all stale connections at once rather than failing one request each
+    -->
+    <connectionManager minPoolSize="5" maxPoolSize="20" connectionTimeout="10s" maxIdleTime="10m"
+                       agedTimeout="30m" purgePolicy="EntirePool"/>
+  </dataSource>
+
+  <webApplication id="bank-api" location="bank-api.war" contextRoot="/bank"/>
+
+  <applicationManager autoExpand="true"/>
+  <!-- Do not reveal server details in error pages / headers -->
+  <webContainer disableXPoweredBy="true"/>
+  <logging consoleLogLevel="INFO" traceSpecification="*=info"/>
+</server>

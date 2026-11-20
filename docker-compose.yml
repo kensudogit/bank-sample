@@ -1,0 +1,59 @@
+name: bank-sample
+
+services:
+  # Oracle Database 23ai Free (PDB: FREEPDB1, app schema: BANK)
+  oracle:
+    image: gvenzl/oracle-free:23-slim
+    environment:
+      ORACLE_PASSWORD: ${ORACLE_PASSWORD:?set ORACLE_PASSWORD in .env}
+      APP_USER: ${BANK_DB_USER:-BANK}
+      APP_USER_PASSWORD: ${BANK_DB_PASSWORD:?set BANK_DB_PASSWORD in .env}
+      # Init scripts contain Japanese text: make SQL*Plus read them as UTF-8
+      NLS_LANG: AMERICAN_AMERICA.AL32UTF8
+    ports:
+      - "127.0.0.1:${ORACLE_HOST_PORT:-1521}:1521"
+    volumes:
+      - ./db/init:/container-entrypoint-initdb.d:ro
+      - oracle-data:/opt/oracle/oradata
+    healthcheck:
+      test: ["CMD", "healthcheck.sh"]
+      interval: 10s
+      timeout: 5s
+      retries: 60
+      start_period: 60s
+
+  # IBM WebSphere Application Server Liberty (Java 8) running the Struts 2 API WAR
+  liberty:
+    build:
+      context: ./backend
+    environment:
+      BANK_DB_URL: jdbc:oracle:thin:@//oracle:1521/FREEPDB1
+      BANK_DB_USER: ${BANK_DB_USER:-BANK}
+      BANK_DB_PASSWORD: ${BANK_DB_PASSWORD:?set BANK_DB_PASSWORD in .env}
+      TZ: Asia/Tokyo
+    ports:
+      - "127.0.0.1:${LIBERTY_HOST_PORT:-9080}:9080"
+    depends_on:
+      oracle:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:9080/bank/api/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 40s
+
+  # Next.js (React / TypeScript) frontend; proxies /api/bank/* to Liberty
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        BANK_API_ORIGIN: http://liberty:9080
+    ports:
+      - "127.0.0.1:${FRONTEND_HOST_PORT:-3000}:3000"
+    depends_on:
+      liberty:
+        condition: service_healthy
+
+volumes:
+  oracle-data:

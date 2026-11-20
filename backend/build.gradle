@@ -1,0 +1,60 @@
+plugins {
+    id 'war'
+}
+
+group = 'com.example.bank'
+version = '1.0.0'
+
+// Runtime target: WebSphere Liberty on Java 8 (javax.servlet 4.0)
+tasks.withType(JavaCompile).configureEach {
+    options.release = 8
+    options.encoding = 'UTF-8'
+    options.compilerArgs << '-Xlint:-options'
+}
+
+repositories {
+    mavenCentral()
+}
+
+ext {
+    strutsVersion = '6.13.0'   // last Struts line on Java 8 + javax; keep on the latest 6.x patch
+    log4jVersion = '2.26.1'    // aligned with log4j-api used by struts2-core
+}
+
+configurations {
+    // Oracle JDBC driver is provided to WebSphere Liberty as a shared library, not packaged in the WAR
+    jdbcDriver
+}
+
+dependencies {
+    implementation "org.apache.struts:struts2-core:${strutsVersion}"
+    implementation "org.apache.struts:struts2-json-plugin:${strutsVersion}"
+    implementation "org.apache.logging.log4j:log4j-core:${log4jVersion}"
+
+    providedCompile 'javax.servlet:javax.servlet-api:4.0.1'
+
+    jdbcDriver 'com.oracle.database.jdbc:ojdbc8:23.26.4.0.0'
+
+    testImplementation 'org.junit.jupiter:junit-jupiter:5.10.2'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher:1.10.2'
+    // In-memory DB (Oracle compatibility mode) for service tests; runs on the build JDK only
+    testRuntimeOnly 'com.h2database:h2:2.3.232'
+}
+
+war {
+    archiveFileName = 'bank-api.war'
+}
+
+tasks.register('copyJdbcDriver', Copy) {
+    description = 'Copies the Oracle JDBC driver for the Liberty shared library.'
+    from configurations.jdbcDriver
+    into layout.buildDirectory.dir('liberty/jdbc')
+}
+
+assemble.dependsOn 'copyJdbcDriver'
+
+test {
+    useJUnitPlatform()
+    // Tests run the same DDL/seed scripts as the Oracle container
+    systemProperty 'bank.sqlDir', file('../db/init').absolutePath
+}

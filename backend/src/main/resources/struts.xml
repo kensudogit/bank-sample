@@ -1,0 +1,114 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE struts PUBLIC
+  "-//Apache Software Foundation//DTD Struts Configuration 6.0//EN"
+  "https://struts.apache.org/dtds/struts-6.0.dtd">
+<struts>
+  <!-- REST-style URLs without extension: /bank/api/accounts -->
+  <constant name="struts.action.extension" value=","/>
+
+  <!-- Security baseline -->
+  <constant name="struts.devMode" value="false"/>
+  <constant name="struts.enable.DynamicMethodInvocation" value="false"/>
+  <constant name="struts.mapper.action.prefix.enabled" value="false"/>
+  <constant name="struts.ognl.allowStaticFieldAccess" value="false"/>
+  <constant name="struts.parameters.requireAnnotations" value="true"/>
+  <constant name="struts.serve.static" value="false"/>
+
+  <constant name="struts.i18n.encoding" value="UTF-8"/>
+  <constant name="struts.custom.i18n.resources" value="messages"/>
+  <constant name="struts.locale" value="ja_JP"/>
+
+  <package name="api" namespace="/api" extends="json-default">
+
+    <interceptors>
+      <interceptor name="apiGuard" class="com.example.bank.interceptor.ApiGuardInterceptor"/>
+
+      <interceptor-stack name="apiReadStack">
+        <interceptor-ref name="apiGuard"><param name="allowedMethods">GET</param></interceptor-ref>
+        <interceptor-ref name="defaultStack">
+          <param name="exception.logEnabled">true</param>
+          <param name="exception.logLevel">ERROR</param>
+        </interceptor-ref>
+      </interceptor-stack>
+
+      <interceptor-stack name="apiWriteStack">
+        <interceptor-ref name="apiGuard"><param name="allowedMethods">POST</param></interceptor-ref>
+        <!-- Populates the Action from the JSON request body -->
+        <interceptor-ref name="json">
+          <param name="enableSMD">false</param>
+        </interceptor-ref>
+        <interceptor-ref name="defaultStack">
+          <param name="exception.logEnabled">true</param>
+          <param name="exception.logLevel">ERROR</param>
+        </interceptor-ref>
+      </interceptor-stack>
+    </interceptors>
+
+    <default-interceptor-ref name="apiReadStack"/>
+
+    <!-- Result name -> HTTP status (see ErrorCode). Cache-Control: no-store is set by ApiGuardInterceptor -->
+    <global-results>
+      <result name="success" type="json"><param name="root">response</param></result>
+      <result name="input" type="json"><param name="root">response</param><param name="statusCode">400</param></result>
+      <result name="badRequest" type="json"><param name="root">response</param><param name="statusCode">400</param></result>
+      <result name="forbidden" type="json"><param name="root">response</param><param name="statusCode">403</param></result>
+      <result name="notFound" type="json"><param name="root">response</param><param name="statusCode">404</param></result>
+      <result name="methodNotAllowed" type="json"><param name="root">response</param><param name="statusCode">405</param></result>
+      <result name="conflict" type="json"><param name="root">response</param><param name="statusCode">409</param></result>
+      <result name="unprocessable" type="json"><param name="root">response</param><param name="statusCode">422</param></result>
+      <result name="systemError" type="json"><param name="root">systemErrorResponse</param><param name="statusCode">500</param></result>
+    </global-results>
+
+    <global-exception-mappings>
+      <exception-mapping exception="java.lang.Exception" result="systemError"/>
+    </global-exception-mappings>
+
+    <action name="health" class="com.example.bank.action.HealthAction"/>
+    <action name="accounts" class="com.example.bank.action.AccountsAction"/>
+    <action name="account" class="com.example.bank.action.AccountDetailAction"/>
+
+    <action name="deposit" class="com.example.bank.action.CashAction" method="deposit">
+      <interceptor-ref name="apiWriteStack"/>
+    </action>
+    <action name="withdraw" class="com.example.bank.action.CashAction" method="withdraw">
+      <interceptor-ref name="apiWriteStack"/>
+    </action>
+    <action name="transfer" class="com.example.bank.action.TransferAction">
+      <interceptor-ref name="apiWriteStack"/>
+    </action>
+
+    <!-- 取引履歴・利息照会 -->
+    <action name="transactions" class="com.example.bank.action.TransactionsAction"/>
+    <action name="interest-preview" class="com.example.bank.action.InterestAction" method="preview"/>
+
+    <!-- 顧客・本人確認・口座開設 -->
+    <action name="customers" class="com.example.bank.action.CustomersAction"/>
+    <action name="customer" class="com.example.bank.action.CustomersAction" method="detail"/>
+    <action name="customer-register" class="com.example.bank.action.CustomerRegisterAction">
+      <interceptor-ref name="apiWriteStack"/>
+    </action>
+    <action name="customer-kyc" class="com.example.bank.action.KycDecisionAction">
+      <interceptor-ref name="apiWriteStack"/>
+    </action>
+    <action name="account-open" class="com.example.bank.action.AccountOpenAction">
+      <interceptor-ref name="apiWriteStack"/>
+    </action>
+
+    <!-- 解約・休眠 -->
+    <action name="account-close" class="com.example.bank.action.AccountLifecycleAction" method="close">
+      <interceptor-ref name="apiWriteStack"/>
+    </action>
+    <action name="account-reactivate" class="com.example.bank.action.AccountLifecycleAction" method="reactivate">
+      <interceptor-ref name="apiWriteStack"/>
+    </action>
+    <action name="dormancy" class="com.example.bank.action.DormancyAction" method="report"/>
+    <action name="dormancy-run" class="com.example.bank.action.DormancyAction" method="run">
+      <interceptor-ref name="apiWriteStack"/>
+    </action>
+
+    <!-- 利息決算（バッチ） -->
+    <action name="interest-settle" class="com.example.bank.action.InterestAction" method="settle">
+      <interceptor-ref name="apiWriteStack"/>
+    </action>
+  </package>
+</struts>
