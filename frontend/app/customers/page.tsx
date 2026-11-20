@@ -1,11 +1,20 @@
 "use client";
 
 import Link from "next/link";
+import { RequireRole } from "@/components/AuthProvider";
 import { ErrorBox, Loading } from "@/components/Feedback";
 import { useCustomers } from "@/lib/api";
 import { formatDate, idDocLabel, kycLabel } from "@/lib/format";
 
 export default function CustomersPage() {
+  return (
+    <RequireRole roles={["TELLER", "SUPERVISOR"]}>
+      <CustomerList />
+    </RequireRole>
+  );
+}
+
+function CustomerList() {
   const { data: customers, error } = useCustomers();
   const pending = customers?.filter((c) => c.kycStatus === "PENDING").length ?? 0;
 

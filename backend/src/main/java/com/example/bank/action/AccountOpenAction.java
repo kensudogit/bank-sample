@@ -14,6 +14,7 @@ public class AccountOpenAction extends KeyedWriteAction {
     private String customerId;
     private String accountType;
     private String initialDeposit;
+    private String currency;
 
     public AccountOpenAction() { this(CustomerService.getDefault()); }
 
@@ -38,14 +39,19 @@ public class AccountOpenAction extends KeyedWriteAction {
     @Override
     public String execute() {
         try {
-            return ok(customers.openAccount(customerId, accountType, InputRules.toAmount(initialDeposit),
-                    getIdempotencyKey()));
+            return ok(customers.openAccount(customerId, accountType, currency == null ? "JPY" : currency.trim(),
+                    InputRules.toAmount(initialDeposit), getIdempotencyKey()));
         } catch (BankException e) {
             return fail(e);
         }
     }
 
+    @Override
+    public String getAuditTarget() { return customerId + " " + accountType; }
+
     @StrutsParameter public void setCustomerId(String customerId) { this.customerId = customerId; }
     @StrutsParameter public void setAccountType(String accountType) { this.accountType = accountType; }
     @StrutsParameter public void setInitialDeposit(String initialDeposit) { this.initialDeposit = initialDeposit; }
+    /** 外貨預金の通貨（USD / EUR） */
+    @StrutsParameter public void setCurrency(String currency) { this.currency = currency; }
 }

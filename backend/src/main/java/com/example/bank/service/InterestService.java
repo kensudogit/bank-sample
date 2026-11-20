@@ -94,8 +94,12 @@ public class InterestService {
         if ("CLOSED".equals(account.getStatus())) {
             return Period.empty(account).toResult(false, "解約済み");
         }
+        if ("TIME".equals(account.getAccountType())) {
+            return Period.empty(account).toResult(false, "定期預金は満期時（または中途解約時）に利息を計算");
+        }
         Period p = compute(c, account, asOf);
         if (p.calc.days == 0) return p.toResult(false, "決算済み（対象期間なし）");
+        String ccy = account.getCurrency();
 
         interest.insertSettlement(c, account.getAccountNo(), p.from, p.to, p.calc, now);
         BigDecimal gross = p.calc.grossInterest;
@@ -107,10 +111,25 @@ public class InterestService {
             if (tax.signum() > 0) {
                 balance = balance.subtract(tax);
                 transactions.insert(c, account.getAccountNo(), TxType.TAX, tax, balance, null,
-                        "国税 " + yen(p.calc.nationalTax) + " 地方税 " + yen(p.calc.localTax), null, now);
+                        "国税 " + money(p.calc.nationalTax, ccy) + " 地方税 " + money(p.calc.localTax, ccy), null, now);
             }
             accounts.updateBalance(c, account.getAccountNo(), balance, now, false);
         }
+        if (p.overdraft != null && p.overdraft.grossInterest.signum() > 0) {
+            // 当座貸越利息: 貸越残高（マイナス残高）の日々の合計 × 貸越利率 ÷ 365。極度額の範囲で徴収する
+            Account current = BankService.lockExisting(c, accounts, account.getAccountNo());
+            BigDecimal headroom = current.getBalance().add(current.getOverdraftLimit()).max(BigDecimal.ZERO);
+            BigDecimal charge = p.overdraft.grossInterest.min(headroom);
+            if (charge.signum() > 0) {
+                BigDecimal balance = current.getBalance().subtract(charge);
+                transactions.insert(c, account.getAccountNo(), TxType.OD_INTEREST, charge, balance, null,
+                        "当座貸越利息 " + p.from + "〜" + p.to, null, now);
+                accounts.updateBalance(c, account.getAccountNo(), balance, now, false);
+            }
+            return p.toResult(true, "決算済み（当座貸越利息 " + money(charge, ccy) + " を徴収"
+                    + (charge.compareTo(p.overdraft.grossInterest) < 0 ? "・極度額超過分は未収" : "") + "）");
+        }
+        if ("CHECKING".equals(account.getAccountType())) return p.toResult(true, "決算済み（当座預金は無利息）");
         return p.toResult(true, gross.signum() > 0 ? "決算済み" : "決算済み（利息 0 円）");
     }
 
@@ -125,9 +144,25 @@ public class InterestService {
                 new ArrayList<InterestCalculator.Rate>(), from, to));
 
         BigDecimal opening = transactions.balanceBefore(c, accountNo, from.atStartOfDay());
-        Calculation calc = InterestCalculator.calculate(opening,
-                transactions.balanceChanges(c, accountNo, from.atStartOfDay(), to.plusDays(1).atStartOfDay()),
-                interest.rates(c, account.getAccountType()), from, to);
+        List<InterestCalculator.BalanceChange> changes =
+                transactions.balanceChanges(c, accountNo, from.atStartOfDay(), to.plusDays(1).atStartOfDay());
+        if ("CHECKING".equals(account.getAccountType())) {
+            // No interest on checking accounts; overdraft interest on the negative part of the balance
+            Calculation none = InterestCalculator.calculate(opening.max(BigDecimal.ZERO), changes,
+                    new ArrayList<InterestCalculator.Rate>(), from, to);
+            Period p = new Period(account, from, to, none);
+            BigDecimal odRate = overdraftRate(c, accountNo);
+            if (odRate.signum() > 0) {
+                List<InterestCalculator.BalanceChange> negative = new ArrayList<>();
+                for (InterestCalculator.BalanceChange ch : changes) {
+                    negative.add(new InterestCalculator.BalanceChange(ch.at, ch.balanceAfter.negate().max(BigDecimal.ZERO)));
+                }
+                p.overdraft = InterestCalculator.calculate(opening.negate().max(BigDecimal.ZERO), negative,
+                        java.util.Collections.singletonList(new InterestCalculator.Rate(from, odRate)), from, to);
+            }
+            return p;
+        }
+        Calculation calc = InterestCalculator.calculate(opening, changes, interest.rates(c, rateKey(account)), from, to);
         return new Period(account, from, to, calc);
     }
 
@@ -139,8 +174,25 @@ public class InterestService {
         return asOf;
     }
 
-    private static String yen(BigDecimal amount) {
-        return NumberFormat.getIntegerInstance(Locale.JAPAN).format(amount) + "円";
+    /** 金利表のキー（外貨預金は FX_<通貨>）。 */
+    static String rateKey(Account account) {
+        return "FOREIGN".equals(account.getAccountType()) ? "FX_" + account.getCurrency() : account.getAccountType();
+    }
+
+    /** 当座貸越契約（実行中）の貸越利率。契約がなければ 0。 */
+    private static BigDecimal overdraftRate(Connection c, String accountNo) throws SQLException {
+        List<java.util.Map<String, Object>> rows = com.example.bank.repository.ProductRepository.query(c,
+                "SELECT annual_rate FROM loan WHERE product = 'OVERDRAFT' AND repayment_account_no = ? "
+                + "AND status IN ('ACTIVE', 'DELINQUENT')", accountNo);
+        return rows.isEmpty() ? BigDecimal.ZERO : (BigDecimal) rows.get(0).get("annualRate");
+    }
+
+    /** 金額表示（円は「1,234円」、外貨は「12.34 USD」）。金額は最小単位（円・セント）。 */
+    static String money(BigDecimal minor, String currency) {
+        if (currency == null || "JPY".equals(currency)) {
+            return NumberFormat.getIntegerInstance(Locale.JAPAN).format(minor) + "円";
+        }
+        return DepositMath.fromMinor(minor, currency).toPlainString() + " " + currency;
     }
 
     /** 計算期間と結果。 */
@@ -149,6 +201,8 @@ public class InterestService {
         final LocalDate from;
         final LocalDate to;
         final Calculation calc;
+        /** 当座預金: 当座貸越利息の計算（貸越なし・契約なしは null） */
+        Calculation overdraft;
 
         Period(Account account, LocalDate from, LocalDate to, Calculation calc) {
             this.account = account;

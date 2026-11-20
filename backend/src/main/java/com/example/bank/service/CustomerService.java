@@ -64,9 +64,14 @@ public class CustomerService {
 
     /** 口座開設の申込（顧客登録）。本人確認は未了（PENDING）で登録される。 */
     public Customer register(NewCustomer input, String idempotencyKey) {
+        return register(input, idempotencyKey, null);
+    }
+
+    /** @param registeredBy 申込を受け付けた行員（本人確認の判定者と同じ人にはできない） */
+    public Customer register(NewCustomer input, String idempotencyKey, String registeredBy) {
         LocalDate today = LocalDate.now(clock);
         if (input.birthDate.isAfter(today)) throw new BankException(ErrorCode.VALIDATION_ERROR);
-        if (Period.between(input.birthDate, today).getYears() < MIN_AGE) {
+        if (!"CORPORATE".equals(input.customerType) && Period.between(input.birthDate, today).getYears() < MIN_AGE) {
             throw new BankException(ErrorCode.AGE_RESTRICTION, String.valueOf(MIN_AGE));
         }
         return Transactions.inTransaction(dataSource.get(), c -> {
@@ -77,7 +82,7 @@ public class CustomerService {
                 throw new BankException(ErrorCode.CUSTOMER_ALREADY_EXISTS);
             }
             String customerId = customers.nextCustomerId(c);
-            customers.insert(c, customerId, input, now);
+            customers.insert(c, customerId, input, registeredBy, now);
             return findCustomer(c, customerId);
         });
     }
@@ -88,6 +93,13 @@ public class CustomerService {
      * @param decision VERIFIED（確認済）または REJECTED（謝絶）
      */
     public Customer decideKyc(String customerId, String decision, String note) {
+        return decideKyc(customerId, decision, note, null);
+    }
+
+    /**
+     * @param decidedBy 判定する行員。申込を受け付けた行員と同一人物は不可（職務分離）
+     */
+    public Customer decideKyc(String customerId, String decision, String note, String decidedBy) {
         if (!"VERIFIED".equals(decision) && !"REJECTED".equals(decision)) {
             throw new BankException(ErrorCode.VALIDATION_ERROR);
         }
@@ -97,7 +109,10 @@ public class CustomerService {
             if (!"PENDING".equals(customer.getKycStatus())) {
                 throw new BankException(ErrorCode.KYC_ALREADY_DECIDED, customerId);
             }
-            customers.decideKyc(c, customerId, decision, note, LocalDateTime.now(clock));
+            if (decidedBy != null && decidedBy.equals(customer.getRegisteredBy())) {
+                throw new BankException(ErrorCode.SEGREGATION_OF_DUTIES);
+            }
+            customers.decideKyc(c, customerId, decision, note, decidedBy, LocalDateTime.now(clock));
             return findCustomer(c, customerId);
         });
     }
@@ -108,12 +123,33 @@ public class CustomerService {
      * @param initialDeposit 開設時の入金額（0 は入金なし）
      */
     public Account openAccount(String customerId, String accountType, BigDecimal initialDeposit, String idempotencyKey) {
-        if (!"ORDINARY".equals(accountType) && !"SAVINGS".equals(accountType)) {
-            throw new BankException(ErrorCode.VALIDATION_ERROR);
-        }
+        return openAccount(customerId, accountType, "JPY", initialDeposit, idempotencyKey);
+    }
+
+    /**
+     * 口座開設（本人確認済みの顧客のみ）。
+     * <ul>
+     *   <li>普通・貯蓄・通知: 同じ種別は 1 顧客 1 口座。通知預金は最低 50,000 円の預入が必要</li>
+     *   <li>当座: 法人のみ（当座貸越は融資の契約で設定）</li>
+     *   <li>外貨: 通貨（USD / EUR）ごとに 1 口座。残高 0 で開設し、円口座からの両替で入金する</li>
+     *   <li>定期: 資金口座からの振替で作成する（{@link DepositProductService#createTimeDeposit}）</li>
+     * </ul>
+     *
+     * @param initialDeposit 開設時の入金額（円口座のみ。0 は入金なし）
+     */
+    public Account openAccount(String customerId, String accountType, String currency, BigDecimal initialDeposit,
+                               String idempotencyKey) {
+        if (!OPENABLE_TYPES.contains(accountType)) throw new BankException(ErrorCode.VALIDATION_ERROR);
+        String ccy = "FOREIGN".equals(accountType) ? (currency == null ? "" : currency) : "JPY";
+        if (!"JPY".equals(ccy) && !"USD".equals(ccy) && !"EUR".equals(ccy)) throw new BankException(ErrorCode.VALIDATION_ERROR);
+        if ("FOREIGN".equals(accountType) && "JPY".equals(ccy)) throw new BankException(ErrorCode.CURRENCY_MISMATCH, ccy);
         BigDecimal deposit = initialDeposit == null ? BigDecimal.ZERO : initialDeposit;
         if (deposit.signum() > 0) BankService.checkAmount(deposit);
         else if (deposit.signum() < 0) throw new BankException(ErrorCode.VALIDATION_ERROR);
+        if ("FOREIGN".equals(accountType) && deposit.signum() > 0) throw new BankException(ErrorCode.CURRENCY_MISMATCH, ccy);
+        if ("NOTICE".equals(accountType) && deposit.compareTo(DepositProductService.NOTICE_MIN) < 0) {
+            throw new BankException(ErrorCode.MINIMUM_AMOUNT, "50,000");
+        }
 
         return Transactions.inTransaction(dataSource.get(), c -> {
             LocalDateTime now = LocalDateTime.now(clock);
@@ -122,11 +158,14 @@ public class CustomerService {
             Customer customer = customers.lockById(c, customerId)
                     .orElseThrow(() -> new BankException(ErrorCode.CUSTOMER_NOT_FOUND, customerId));
             if (!customer.isVerified()) throw new BankException(ErrorCode.KYC_NOT_VERIFIED, customerId);
-            if (accounts.countOpenByCustomerAndType(c, customerId, accountType) > 0) {
+            if ("CHECKING".equals(accountType) && !customer.isCorporate()) {
+                throw new BankException(ErrorCode.CORPORATE_ONLY);
+            }
+            if (accounts.countOpenByCustomerTypeCurrency(c, customerId, accountType, ccy) > 0) {
                 throw new BankException(ErrorCode.ACCOUNT_TYPE_LIMIT);
             }
             String accountNo = accounts.nextAccountNo(c);
-            accounts.insert(c, accountNo, customerId, accountType, deposit, now);
+            accounts.insert(c, accountNo, customerId, accountType, ccy, deposit, now);
             if (deposit.signum() > 0) {
                 transactions.insert(c, accountNo, TxType.DEPOSIT, deposit, deposit, null, "口座開設時入金",
                         idempotencyKey, now);
@@ -134,6 +173,10 @@ public class CustomerService {
             return accounts.findById(c, accountNo).orElseThrow(() -> new SQLException("account not created"));
         });
     }
+
+    /** 口座開設で選べる種別（定期預金は専用の手続き） */
+    public static final java.util.List<String> OPENABLE_TYPES =
+            java.util.Arrays.asList("ORDINARY", "SAVINGS", "CHECKING", "NOTICE", "FOREIGN");
 
     private Customer findCustomer(Connection c, String customerId) throws SQLException {
         return customers.findById(c, customerId)

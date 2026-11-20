@@ -39,6 +39,14 @@
 
   <webApplication id="bank-api" location="bank-api.war" contextRoot="/bank"/>
 
+  <!--
+    Login session cookie: HttpOnly (not readable by scripts), SameSite=Lax (not sent on cross-site POSTs),
+    path "/" so the browser also sends it through the Next.js proxy (/api/bank/*).
+    Set cookieSecure="true" once the site is served over HTTPS.
+  -->
+  <httpSession cookieName="BANKSESSION" cookieHttpOnly="true" cookieSameSite="Lax" cookiePath="/"
+               cookieSecure="false"/>
+
   <applicationManager autoExpand="true"/>
   <!-- Do not reveal server details in error pages / headers -->
   <webContainer disableXPoweredBy="true"/>

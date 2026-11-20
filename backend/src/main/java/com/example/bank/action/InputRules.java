@@ -28,7 +28,8 @@ final class InputRules {
     private static final Pattern PAGE = Pattern.compile("^[1-9][0-9]{0,5}$");
     private static final Set<String> ID_DOC_TYPES =
             new HashSet<>(Arrays.asList("DRIVER_LICENSE", "MY_NUMBER_CARD", "PASSPORT", "RESIDENCE_CARD"));
-    private static final Set<String> ACCOUNT_TYPES = new HashSet<>(Arrays.asList("ORDINARY", "SAVINGS"));
+    private static final Set<String> ACCOUNT_TYPES =
+            new HashSet<>(Arrays.asList("ORDINARY", "SAVINGS", "CHECKING", "NOTICE", "FOREIGN"));
 
     static final int MEMO_MAX = 50;
     static final int NAME_MAX = 50;

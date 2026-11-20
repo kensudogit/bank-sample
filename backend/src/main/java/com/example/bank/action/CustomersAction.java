@@ -32,6 +32,7 @@ public class CustomersAction extends BaseApiAction {
             return INPUT;
         }
         try {
+            requireCustomerAccess(customerId);
             return ok(customers.getCustomer(customerId));
         } catch (BankException e) {
             return fail(e);
@@ -39,5 +40,8 @@ public class CustomersAction extends BaseApiAction {
     }
 
     public String getCustomerId() { return customerId; }
+
+    @Override
+    public String getAuditTarget() { return customerId; }
     @StrutsParameter public void setCustomerId(String customerId) { this.customerId = customerId; }
 }

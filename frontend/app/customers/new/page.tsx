@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
+import { RequireRole } from "@/components/AuthProvider";
 import { ErrorBox } from "@/components/Feedback";
 import { ApiError, bankApi, newIdempotencyKey, type RegisterCustomerRequest } from "@/lib/api";
 import { idDocLabel, normalizeDigits } from "@/lib/format";
@@ -11,6 +12,7 @@ import type { IdDocType } from "@/lib/types";
 type Form = Omit<RegisterCustomerRequest, "idempotencyKey">;
 
 const EMPTY: Form = {
+  customerType: "INDIVIDUAL",
   name: "",
   nameKana: "",
   birthDate: "",
@@ -23,6 +25,14 @@ const EMPTY: Form = {
 
 /** 口座開設の申込: 顧客情報と本人確認書類を受け付ける（本人確認は次の画面で担当者が行う）。 */
 export default function NewCustomerPage() {
+  return (
+    <RequireRole roles={["TELLER", "SUPERVISOR"]}>
+      <NewCustomerForm />
+    </RequireRole>
+  );
+}
+
+function NewCustomerForm() {
   const router = useRouter();
   const [form, setForm] = useState<Form>(EMPTY);
   const [key, setKey] = useState(newIdempotencyKey);
@@ -57,16 +67,22 @@ export default function NewCustomerPage() {
 
   return (
     <>
-      <p>
-        <Link href="/customers">← 顧客一覧</Link>
-      </p>
+      <Link href="/customers" className="back-link">← 顧客一覧</Link>
       <h1>口座開設の申込</h1>
       <ErrorBox error={error} />
       <section className="card">
         <form className="wide" onSubmit={submit}>
+          <div className="tabs" role="tablist">
+            {(["INDIVIDUAL", "CORPORATE"] as const).map((t) => (
+              <button key={t} type="button" role="tab" className="tab" aria-selected={form.customerType === t}
+                onClick={() => setForm({ ...form, customerType: t })}>
+                {t === "INDIVIDUAL" ? "個人" : "法人"}
+              </button>
+            ))}
+          </div>
           <div className="form-grid">
             <label>
-              氏名
+              {form.customerType === "CORPORATE" ? "商号" : "氏名"}
               <input required maxLength={50} autoComplete="off" value={form.name} onChange={set("name")}
                 placeholder="山田 太郎" />
             </label>
@@ -77,9 +93,9 @@ export default function NewCustomerPage() {
               <span className="hint">全角カタカナ</span>
             </label>
             <label>
-              生年月日
+              {form.customerType === "CORPORATE" ? "設立日" : "生年月日"}
               <input type="date" required value={form.birthDate} onChange={set("birthDate")} />
-              <span className="hint">18歳以上の方</span>
+              <span className="hint">{form.customerType === "CORPORATE" ? "登記事項証明書で確認" : "18歳以上の方"}</span>
             </label>
             <label>
               電話番号

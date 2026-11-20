@@ -3,13 +3,19 @@
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import { useState } from "react";
+import { RequireRole, useAuth } from "@/components/AuthProvider";
 import { ErrorBox, Loading, SuccessBox } from "@/components/Feedback";
 import { ApiError, bankApi, newIdempotencyKey, prefetchAccountDetail, useCustomer } from "@/lib/api";
+import { riskApi, useCustomer360, type Row } from "@/lib/banking";
 import {
   accountTypeLabel,
   formatDate,
   formatDateTime,
+  formatMoney,
   formatYen,
+  productLabel,
+  loanStatusLabel,
+  amlRuleLabel,
   idDocLabel,
   kycLabel,
   normalizeAmount,
@@ -18,6 +24,15 @@ import {
 import type { Account, AccountType, Customer } from "@/lib/types";
 
 export default function CustomerDetailPage() {
+  return (
+    <RequireRole roles={["TELLER", "SUPERVISOR"]}>
+      <CustomerDetail />
+    </RequireRole>
+  );
+}
+
+function CustomerDetail() {
+  const { user } = useAuth();
   const { customerId } = useParams<{ customerId: string }>();
   const { data: customer, error } = useCustomer(customerId);
 
@@ -33,9 +48,7 @@ export default function CustomerDetailPage() {
 
   return (
     <>
-      <p>
-        <Link href="/customers">← 顧客一覧</Link>
-      </p>
+      <Link href="/customers" className="back-link">← 顧客一覧</Link>
       <h1>
         {customer.name} <span className="muted">（{customer.customerId}）</span>
       </h1>
@@ -67,6 +80,12 @@ export default function CustomerDetailPage() {
             <dd>{customer.idDocType ? `${idDocLabel[customer.idDocType]}（下4桁 ${customer.idDocLast4}）` : "—"}</dd>
           </div>
           <div>
+            <dt>受付者／判定者</dt>
+            <dd>
+              {customer.registeredBy ?? "—"} ／ {customer.kycDecidedBy ?? "—"}
+            </dd>
+          </div>
+          <div>
             <dt>本人確認</dt>
             <dd>
               <span className={`badge badge-${customer.kycStatus}`}>{kycLabel[customer.kycStatus]}</span>
@@ -77,13 +96,20 @@ export default function CustomerDetailPage() {
         {customer.kycNote && <p className="section-note" style={{ marginTop: 12 }}>備考: {customer.kycNote}</p>}
       </section>
 
-      {customer.kycStatus === "PENDING" && <KycDecision customer={customer} />}
+      {customer.kycStatus === "PENDING" &&
+        (user?.role === "SUPERVISOR" ? (
+          <KycDecision customer={customer} />
+        ) : (
+          <div className="alert alert-error">本人確認待ちです。役席者が書類を確認して判定します（申込の受付者とは別の役席者）。</div>
+        ))}
       {customer.kycStatus === "VERIFIED" && <OpenAccountForm customer={customer} />}
+      {customer.kycStatus === "VERIFIED" && <IssueLogin customer={customer} />}
       {customer.kycStatus === "REJECTED" && (
         <div className="alert alert-error">本人確認が謝絶されているため、口座を開設できません。</div>
       )}
 
       <AccountList accounts={customer.accounts} />
+      <Customer360 customerId={customer.customerId} />
     </>
   );
 }
@@ -131,6 +157,47 @@ function KycDecision({ customer }: { customer: Customer }) {
   );
 }
 
+/** オンラインバンキングのログイン発行。初期パスワードはこの画面で一度だけ表示する（保存はハッシュのみ）。 */
+function IssueLogin({ customer }: { customer: Customer }) {
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<unknown>(null);
+  const [issued, setIssued] = useState<{ userId: string; initialPassword: string } | null>(null);
+
+  const issue = async () => {
+    if (submitting) return;
+    setSubmitting(true);
+    setError(null);
+    try {
+      setIssued(await bankApi.issueCustomerLogin(customer.customerId));
+    } catch (err) {
+      setError(err);
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <section className="card">
+      <h2>オンラインバンキング</h2>
+      <ErrorBox error={error} />
+      {issued ? (
+        <SuccessBox>
+          利用者ID <span className="secret">{issued.userId}</span> ／ 初期パスワード{" "}
+          <span className="secret">{issued.initialPassword}</span>
+          <br />
+          この初期パスワードは再表示できません。お客さまに安全な方法でお渡しください（初回ログイン時に変更が必要です）。
+        </SuccessBox>
+      ) : (
+        <div className="actions">
+          <button className="btn btn-secondary" type="button" onClick={issue} disabled={submitting}>
+            {submitting ? "発行中…" : "ログインを発行する"}
+          </button>
+        </div>
+      )}
+    </section>
+  );
+}
+
 function OpenAccountForm({ customer }: { customer: Customer }) {
   const [accountType, setAccountType] = useState<AccountType>("ORDINARY");
   const [deposit, setDeposit] = useState("");
@@ -140,7 +207,11 @@ function OpenAccountForm({ customer }: { customer: Customer }) {
   const [opened, setOpened] = useState<Account | null>(null);
 
   const held = new Set(customer.accounts.filter((a) => a.status !== "CLOSED").map((a) => a.accountType));
-  const available = (["ORDINARY", "SAVINGS"] as const).filter((t) => !held.has(t));
+  const [currency, setCurrency] = useState("USD");
+  // One account per type (per currency for foreign deposits); checking accounts for corporate customers only
+  const heldForeign = new Set(customer.accounts.filter((a) => a.status !== "CLOSED" && a.accountType === "FOREIGN").map((a) => a.currency));
+  const available = (["ORDINARY", "SAVINGS", "CHECKING", "NOTICE", "FOREIGN"] as const).filter((t) =>
+    t === "FOREIGN" ? heldForeign.size < 2 : !held.has(t) && (t !== "CHECKING" || customer.customerType === "CORPORATE"));
   // After opening one type, fall back to the type that is still available
   const selected: AccountType = available.includes(accountType as (typeof available)[number])
     ? accountType
@@ -156,7 +227,8 @@ function OpenAccountForm({ customer }: { customer: Customer }) {
       const account = await bankApi.openAccount({
         customerId: customer.customerId,
         accountType: selected,
-        initialDeposit: normalizeAmount(deposit) || "0",
+        currency: selected === "FOREIGN" ? currency : undefined,
+        initialDeposit: selected === "FOREIGN" ? "0" : normalizeAmount(deposit) || "0",
         idempotencyKey: key,
       });
       setOpened(account);
@@ -195,6 +267,15 @@ function OpenAccountForm({ customer }: { customer: Customer }) {
               ))}
             </select>
           </label>
+          {selected === "FOREIGN" && (
+            <label>
+              通貨
+              <select value={currency} onChange={(e) => setCurrency(e.target.value)}>
+                {(["USD", "EUR"] as const).filter((c) => !heldForeign.has(c)).map((c) => <option key={c}>{c}</option>)}
+              </select>
+              <span className="hint">外貨預金は残高0で開設し、円口座からの両替で入金します</span>
+            </label>
+          )}
           <label>
             開設時入金額（円・任意）
             <input inputMode="numeric" autoComplete="off" maxLength={12} value={deposit}
@@ -242,13 +323,111 @@ function AccountList({ accounts }: { accounts: Account[] }) {
                 <td>
                   <span className={`badge badge-${a.status}`}>{statusLabel[a.status]}</span>
                 </td>
-                <td className="num">{formatYen(a.balance)}</td>
+                <td className="num">{formatMoney(a.balance, a.currency)}</td>
                 <td>{formatDate(a.openedAt)}</td>
                 <td>{formatDate(a.lastActivityAt)}</td>
               </tr>
             ))}
           </tbody>
         </table>
+      )}
+    </section>
+  );
+}
+
+const noteTypeLabel: Record<string, string> = { VISIT: "訪問", CALL: "電話", PROPOSAL: "提案", COMPLAINT: "苦情", MEMO: "メモ" };
+
+/** 顧客 360°（CRM）: 預かり資産・融資・定期・口座振替・AML・接触履歴。 */
+function Customer360({ customerId }: { customerId: string }) {
+  const { data, error } = useCustomer360(customerId);
+  const [type, setType] = useState("VISIT");
+  const [content, setContent] = useState("");
+  const [err, setErr] = useState<unknown>(null);
+  if (!data) return error ? <ErrorBox error={error} /> : null;
+
+  const addNote = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setErr(null);
+    try {
+      await riskApi.addNote(customerId, type, content);
+      setContent("");
+    } catch (e2) {
+      setErr(e2);
+    }
+  };
+
+  return (
+    <section className="card">
+      <h2>顧客 360°</h2>
+      <dl className="stats">
+        <div className="stat"><dt>顧客区分</dt><dd>{data.segment}</dd></div>
+        <div className="stat"><dt>預かり資産（円換算）</dt><dd>{formatYen(data.totalAssets)}</dd></div>
+        <div className="stat"><dt>融資残高</dt><dd>{formatYen(data.totalLoans)}</dd></div>
+        <div className="stat"><dt>未対応の AML アラート</dt><dd className={data.amlAlerts.some((a: Row) => a.status === "OPEN") ? "minus" : ""}>
+          {data.amlAlerts.filter((a: Row) => a.status === "OPEN").length} 件</dd></div>
+      </dl>
+      <div className="form-grid" style={{ gap: 20 }}>
+        <div>
+          <h3>融資</h3>
+          {data.loans.length === 0 && data.applications.length === 0 ? <p className="empty">なし</p> : (
+            <ul style={{ margin: 0, paddingLeft: 18 }}>
+              {data.loans.map((l: Row) => (
+                <li key={`l${l.loanId}`}><Link href={`/loans/${l.loanId}`}>{productLabel[l.product]} No.{l.loanId}</Link> 残高 {formatYen(l.outstanding)}（{loanStatusLabel[l.status]}）</li>
+              ))}
+              {data.applications.filter((a: Row) => !["EXECUTED", "REJECTED"].includes(a.status)).map((a: Row) => (
+                <li key={`a${a.applicationId}`}><Link href={`/loans/applications/${a.applicationId}`}>申込 No.{a.applicationId}</Link> {productLabel[a.product]}（{loanStatusLabel[a.status]}）</li>
+              ))}
+            </ul>
+          )}
+        </div>
+        <div>
+          <h3>定期預金</h3>
+          {data.timeDeposits.length === 0 ? <p className="empty">なし</p> : (
+            <ul style={{ margin: 0, paddingLeft: 18 }}>
+              {data.timeDeposits.map((t: Row) => (
+                <li key={t.accountNo}><Link href={`/accounts/${t.accountNo}`}>{t.accountNo}</Link> {formatYen(t.principal)}・満期 {formatDate(t.maturityDate)}（{t.status === "ACTIVE" ? "有効" : t.status}）</li>
+              ))}
+            </ul>
+          )}
+        </div>
+        <div>
+          <h3>口座振替・AML</h3>
+          <ul style={{ margin: 0, paddingLeft: 18 }}>
+            {data.mandates.map((m: Row) => <li key={`m${m.mandateId}`}>{m.billerName}（{m.status === "ACTIVE" ? "有効" : "解約"}）</li>)}
+            {data.amlAlerts.map((a: Row) => <li key={`x${a.alertId}`} className="minus">{amlRuleLabel[a.ruleCode] ?? a.ruleCode}（{a.status}）</li>)}
+            {data.mandates.length === 0 && data.amlAlerts.length === 0 && <li className="muted">なし</li>}
+          </ul>
+        </div>
+      </div>
+
+      <h3 style={{ marginTop: 20 }}>接触履歴</h3>
+      <ErrorBox error={err} />
+      <form className="filters" onSubmit={addNote}>
+        <label>
+          種類
+          <select value={type} onChange={(e) => setType(e.target.value)}>
+            {Object.entries(noteTypeLabel).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
+          </select>
+        </label>
+        <label style={{ flex: "1 1 320px" }}>
+          内容
+          <input required maxLength={1000} value={content} onChange={(e) => setContent(e.target.value)} />
+        </label>
+        <div className="actions"><button className="btn btn-small" type="submit">記録</button></div>
+      </form>
+      {data.notes.length > 0 && (
+        <div className="table-wrap">
+          <table>
+            <tbody>
+              {data.notes.map((n: Row) => (
+                <tr key={n.noteId}>
+                  <td className="muted">{formatDateTime(n.createdAt)}</td><td>{noteTypeLabel[n.noteType]}</td>
+                  <td style={{ whiteSpace: "normal" }}>{n.content}</td><td className="muted">{n.createdBy}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       )}
     </section>
   );

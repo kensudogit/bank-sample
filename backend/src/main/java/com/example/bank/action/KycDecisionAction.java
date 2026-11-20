@@ -40,11 +40,14 @@ public class KycDecisionAction extends BaseApiAction {
     @Override
     public String execute() {
         try {
-            return ok(customers.decideKyc(customerId, decision, note));
+            return ok(customers.decideKyc(customerId, decision, note, currentUser().getUserId()));
         } catch (BankException e) {
             return fail(e);
         }
     }
+
+    @Override
+    public String getAuditTarget() { return customerId + " " + decision; }
 
     @StrutsParameter public void setCustomerId(String customerId) { this.customerId = customerId; }
     @StrutsParameter public void setDecision(String decision) { this.decision = decision; }

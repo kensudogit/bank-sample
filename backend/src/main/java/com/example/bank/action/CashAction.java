@@ -41,6 +41,9 @@ public class CashAction extends MoneyOperationAction {
 
     public String getAccountNo() { return accountNo; }
 
+    @Override
+    public String getAuditTarget() { return accountNo + " " + getAmount(); }
+
     @StrutsParameter
     public void setAccountNo(String accountNo) { this.accountNo = accountNo; }
 }

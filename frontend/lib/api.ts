@@ -1,7 +1,13 @@
-import { invalidate, prefetch, useQuery } from "./query";
+import { clearCache, invalidate, prefetch, useQuery } from "./query";
 import type {
   Account,
   AccountDetail,
+  AccountPage,
+  AuditEntry,
+  AuditVerification,
+  JobsInfo,
+  LoginUser,
+  Page,
   ApiErrorBody,
   CloseResult,
   Customer,
@@ -29,7 +35,10 @@ export class ApiError extends Error {
 
 const BASE = "/api/bank";
 
-async function request<T>(path: string, body?: unknown): Promise<T> {
+/** Fired when the server says the session is gone (expired / logged out elsewhere). AuthProvider listens. */
+export const UNAUTHENTICATED_EVENT = "bank:unauthenticated";
+
+export async function request<T>(path: string, body?: unknown): Promise<T> {
   const init: RequestInit = { cache: "no-store", headers: { Accept: "application/json" } };
   if (body !== undefined) {
     init.method = "POST";
@@ -51,6 +60,9 @@ async function request<T>(path: string, body?: unknown): Promise<T> {
   } catch {
     // non-JSON (e.g. proxy error page)
   }
+  if (res.status === 401 && path !== "/login" && path !== "/password-change" && typeof window !== "undefined") {
+    window.dispatchEvent(new Event(UNAUTHENTICATED_EVENT));
+  }
   if (!res.ok || !json || json.error) {
     const err = json?.error;
     throw new ApiError(
@@ -64,7 +76,7 @@ async function request<T>(path: string, body?: unknown): Promise<T> {
 }
 
 /** Builds a query string, skipping empty values. */
-function qs(params: Record<string, string | number | undefined | null>): string {
+export function qs(params: Record<string, string | number | undefined | null>): string {
   const q = new URLSearchParams();
   for (const [k, v] of Object.entries(params)) {
     if (v !== undefined && v !== null && v !== "") q.set(k, String(v));
@@ -91,6 +103,7 @@ export interface TransferRequest {
 }
 
 export interface RegisterCustomerRequest {
+  customerType?: "INDIVIDUAL" | "CORPORATE";
   name: string;
   nameKana: string;
   birthDate: string;
@@ -111,8 +124,37 @@ export interface TransactionQuery {
   size?: number;
 }
 
+export interface AuditQuery {
+  from?: string;
+  to?: string;
+  userId?: string;
+  auditAction?: string;
+  outcome?: string;
+  page?: number;
+  size?: number;
+}
+
+export const authApi = {
+  me: () => request<LoginUser | null>("/me"),
+  login: async (userId: string, password: string) => {
+    const user = await request<LoginUser>("/login", { userId, password });
+    clearCache();   // never show the previous user's data
+    return user;
+  },
+  logout: async () => {
+    try {
+      await request<null>("/logout", {});
+    } finally {
+      clearCache();
+    }
+  },
+  changePassword: (currentPassword: string, newPassword: string) =>
+    request<LoginUser>("/password-change", { currentPassword, newPassword }),
+};
+
 export const bankApi = {
-  listAccounts: () => request<Account[]>("/accounts"),
+  searchAccounts: (q: { q?: string; page?: number; size?: number }) =>
+    request<AccountPage>(`/accounts${qs({ q: q.q, page: q.page, size: q.size })}`),
   getAccount: (accountNo: string) => request<AccountDetail>(`/account${qs({ accountNo })}`),
   searchTransactions: (q: TransactionQuery) =>
     request<TransactionPage>(
@@ -130,7 +172,7 @@ export const bankApi = {
   registerCustomer: (req: RegisterCustomerRequest) => mutate(request<Customer>("/customer-register", req)),
   decideKyc: (req: { customerId: string; decision: "VERIFIED" | "REJECTED"; note?: string }) =>
     mutate(request<Customer>("/customer-kyc", req)),
-  openAccount: (req: { customerId: string; accountType: string; initialDeposit: string; idempotencyKey: string }) =>
+  openAccount: (req: { customerId: string; accountType: string; currency?: string; initialDeposit: string; idempotencyKey: string }) =>
     mutate(request<Account>("/account-open", req)),
   closeAccount: (req: { accountNo: string; payoutAccountNo?: string; idempotencyKey: string }) =>
     mutate(request<CloseResult>("/account-close", req)),
@@ -139,11 +181,20 @@ export const bankApi = {
   settleInterest: (req: { asOf?: string; accountNo?: string }) =>
     mutate(request<SettlementSummary>("/interest-settle", req)),
   runDormancy: (req: { asOf?: string }) => mutate(request<DormancyReport>("/dormancy-run", req)),
+  issueCustomerLogin: (customerId: string) =>
+    mutate(request<{ userId: string; initialPassword: string }>("/customer-login-issue", { customerId })),
+  auditLog: (q: AuditQuery) =>
+    request<Page<AuditEntry>>(`/audit-log${qs({ ...q })}`),
+  auditVerify: () => request<AuditVerification>("/audit-verify"),
+  jobs: () => request<JobsInfo>("/jobs"),
+  runJobs: () => mutate(request<string[]>("/jobs-run", {})),
 };
 
 /** Cache keys for `useQuery` / `prefetch` (see lib/query.ts). */
 export const queryKeys = {
-  accounts: "accounts",
+  accounts: (q: { q?: string; page?: number; size?: number }) => `accounts:${q.q ?? ""}:${q.page ?? 1}:${q.size ?? 50}`,
+  audit: (q: AuditQuery) => `audit:${JSON.stringify(q)}`,
+  jobs: "jobs",
   account: (accountNo: string) => `account:${accountNo}`,
   transactions: (q: TransactionQuery) =>
     `tx:${q.accountNo}:${q.from ?? ""}:${q.to ?? ""}:${(q.types ?? []).join(",")}:${q.page ?? 1}:${q.size ?? 50}`,
@@ -154,7 +205,11 @@ export const queryKeys = {
 };
 
 /** Cached readers: show the last data instantly, refresh in the background. */
-export const useAccounts = () => useQuery(queryKeys.accounts, bankApi.listAccounts);
+/** Account list page. Customers automatically get only their own accounts. */
+export const useAccounts = (q: { q?: string; page?: number; size?: number } = {}) =>
+  useQuery(queryKeys.accounts(q), () => bankApi.searchAccounts(q));
+export const useAuditLog = (q: AuditQuery) => useQuery(queryKeys.audit(q), () => bankApi.auditLog(q));
+export const useJobs = () => useQuery(queryKeys.jobs, bankApi.jobs);
 export const useAccountDetail = (accountNo: string) =>
   useQuery(queryKeys.account(accountNo), () => bankApi.getAccount(accountNo));
 export const prefetchAccountDetail = (accountNo: string) =>
@@ -174,7 +229,7 @@ export const useDormancyReport = (asOf: string) =>
  * unknown (a timeout or DUPLICATE_REQUEST can mean it went through). So every cached view is marked stale;
  * only the ones on screen are re-fetched right away.
  */
-async function mutate<T>(op: Promise<T>): Promise<T> {
+export async function mutate<T>(op: Promise<T>): Promise<T> {
   try {
     return await op;
   } finally {

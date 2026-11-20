@@ -20,7 +20,7 @@ public class AccountRepository {
 
     private static final String ACCOUNT_COLS =
             "a.account_no, a.customer_id, a.account_type, a.balance, a.status, a.updated_at, a.opened_at, "
-          + "a.closed_at, a.last_activity_at, a.dormancy_notified_at, a.dormant_at";
+          + "a.closed_at, a.last_activity_at, a.dormancy_notified_at, a.dormant_at, a.currency, a.overdraft_limit";
     private static final String SELECT_WITH_CUSTOMER =
             "SELECT " + ACCOUNT_COLS + ", c.name AS customer_name "
           + "FROM account a JOIN customer c ON c.customer_id = a.customer_id ";
@@ -57,6 +57,59 @@ public class AccountRepository {
                 return list;
             }
         }
+    }
+
+    /** 件数と残高合計。 */
+    public static final class Summary {
+        public final long count;
+        public final BigDecimal totalBalance;
+
+        Summary(long count, BigDecimal totalBalance) {
+            this.count = count;
+            this.totalBalance = totalBalance;
+        }
+    }
+
+    public Summary summarize(Connection c, String customerScope, String q) throws SQLException {
+        List<Object> params = new ArrayList<>();
+        String sql = "SELECT COUNT(*), COALESCE(SUM(a.balance), 0) FROM account a "
+                   + "JOIN customer c ON c.customer_id = a.customer_id" + searchWhere(customerScope, q, params);
+        try (PreparedStatement ps = c.prepareStatement(sql)) {
+            bind(ps, params.toArray());
+            try (ResultSet rs = ps.executeQuery()) {
+                rs.next();
+                return new Summary(rs.getLong(1), rs.getBigDecimal(2));
+            }
+        }
+    }
+
+    public List<Account> search(Connection c, String customerScope, String q, int offset, int limit)
+            throws SQLException {
+        List<Object> params = new ArrayList<>();
+        String sql = SELECT_WITH_CUSTOMER.trim() + searchWhere(customerScope, q, params)
+                   + " ORDER BY a.account_no OFFSET ? ROWS FETCH NEXT ? ROWS ONLY";
+        params.add(offset);
+        params.add(limit);
+        return list(c, sql, params.toArray());
+    }
+
+    private static String searchWhere(String customerScope, String q, List<Object> params) {
+        StringBuilder sb = new StringBuilder(" WHERE 1 = 1");
+        if (customerScope != null) {
+            sb.append(" AND a.customer_id = ?");
+            params.add(customerScope);
+        }
+        if (q != null && !q.isEmpty()) {
+            // LIKE wildcards in the user input are escaped (escape character '!') so they match literally
+            String escaped = q.replace("!", "!!").replace("%", "!%").replace("_", "!_");
+            sb.append(" AND (a.account_no LIKE ? ESCAPE '!' OR a.customer_id = ? "
+                    + "OR c.name LIKE ? ESCAPE '!' OR c.name_kana LIKE ? ESCAPE '!')");
+            params.add(escaped + "%");
+            params.add(q.toUpperCase());
+            params.add("%" + escaped + "%");
+            params.add("%" + escaped + "%");
+        }
+        return sb.toString();
     }
 
     public Optional<Account> findById(Connection c, String accountNo) throws SQLException {
@@ -101,8 +154,13 @@ public class AccountRepository {
 
     public void insert(Connection c, String accountNo, String customerId, String accountType, BigDecimal balance,
                        LocalDateTime now) throws SQLException {
+        insert(c, accountNo, customerId, accountType, "JPY", balance, now);
+    }
+
+    public void insert(Connection c, String accountNo, String customerId, String accountType, String currency,
+                       BigDecimal balance, LocalDateTime now) throws SQLException {
         String sql = "INSERT INTO account (account_no, customer_id, account_type, balance, status, opened_at, "
-                   + "updated_at, last_activity_at) VALUES (?, ?, ?, ?, 'ACTIVE', ?, ?, ?)";
+                   + "updated_at, last_activity_at, currency) VALUES (?, ?, ?, ?, 'ACTIVE', ?, ?, ?, ?)";
         try (PreparedStatement ps = c.prepareStatement(sql)) {
             Timestamp ts = Timestamp.valueOf(now);
             ps.setString(1, accountNo);
@@ -112,7 +170,29 @@ public class AccountRepository {
             ps.setTimestamp(5, ts);
             ps.setTimestamp(6, ts);
             ps.setTimestamp(7, ts);
+            ps.setString(8, currency);
             ps.executeUpdate();
+        }
+    }
+
+    /** 当座貸越の極度額を設定する（当座貸越契約の実行・解約時）。 */
+    public void setOverdraftLimit(Connection c, String accountNo, BigDecimal limit, LocalDateTime now)
+            throws SQLException {
+        execute(c, "UPDATE account SET overdraft_limit = ?, updated_at = ? WHERE account_no = ?", limit, now, accountNo);
+    }
+
+    /** 同じ顧客・同じ種別・同じ通貨の、解約済みでない口座の数。 */
+    public int countOpenByCustomerTypeCurrency(Connection c, String customerId, String accountType, String currency)
+            throws SQLException {
+        try (PreparedStatement ps = c.prepareStatement("SELECT COUNT(*) FROM account WHERE customer_id = ? "
+                + "AND account_type = ? AND currency = ? AND status <> 'CLOSED'")) {
+            ps.setString(1, customerId);
+            ps.setString(2, accountType);
+            ps.setString(3, currency);
+            try (ResultSet rs = ps.executeQuery()) {
+                rs.next();
+                return rs.getInt(1);
+            }
         }
     }
 
@@ -235,6 +315,8 @@ public class AccountRepository {
                 Timestamps.format(rs.getTimestamp("closed_at")),
                 Timestamps.format(rs.getTimestamp("last_activity_at")),
                 Timestamps.format(rs.getTimestamp("dormancy_notified_at")),
-                Timestamps.format(rs.getTimestamp("dormant_at")));
+                Timestamps.format(rs.getTimestamp("dormant_at")),
+                rs.getString("currency"),
+                rs.getBigDecimal("overdraft_limit"));
     }
 }

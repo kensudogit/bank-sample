@@ -9,6 +9,7 @@ import com.example.bank.domain.OperationResult;
 import com.example.bank.domain.TransactionPage;
 import com.example.bank.domain.TxType;
 import com.example.bank.repository.AccountRepository;
+import com.example.bank.repository.NoticeRepository;
 import com.example.bank.repository.OperationRequestRepository;
 import com.example.bank.repository.TransactionRepository;
 import com.example.bank.support.DataSources;
@@ -22,7 +23,9 @@ import java.sql.SQLException;
 import java.time.Clock;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.function.Supplier;
 
 /**
@@ -34,6 +37,10 @@ public class BankService {
     public static final BigDecimal MAX_AMOUNT_PER_OPERATION = new BigDecimal("10000000");
     public static final int HISTORY_LIMIT = 50;
     public static final int MAX_PAGE_SIZE = 200;
+    /** 1 口座 1 日あたりの出金・振込（出）の合計上限（円） */
+    public static final BigDecimal DAILY_OUTFLOW_LIMIT = new BigDecimal("20000000");
+    /** 通知預金の据置期間（日） */
+    public static final int NOTICE_HOLD_DAYS = 7;
 
     private static final BankService DEFAULT = new BankService(DataSources::bank, Clock.systemDefaultZone());
 
@@ -42,6 +49,7 @@ public class BankService {
     private final AccountRepository accounts = new AccountRepository();
     private final TransactionRepository transactions = new TransactionRepository();
     private final OperationRequestRepository requests = new OperationRequestRepository();
+    private final NoticeRepository notices = new NoticeRepository();
 
     public BankService(Supplier<DataSource> dataSource, Clock clock) {
         this.dataSource = dataSource;
@@ -62,6 +70,33 @@ public class BankService {
 
     public List<Account> listAccounts() {
         return Transactions.readOnly(dataSource.get(), accounts::findAll);
+    }
+
+    /**
+     * 口座一覧の検索（ページ）。
+     *
+     * @param customerScope 指定時はその顧客の口座のみ（顧客ログイン時は本人の顧客番号）
+     * @param q             口座番号の前方一致・顧客番号・氏名／カナの部分一致（null は全件）
+     */
+    public Map<String, Object> searchAccounts(String customerScope, String q, int page, int size) {
+        if (page < 1 || size < 1 || size > MAX_PAGE_SIZE) throw new BankException(ErrorCode.VALIDATION_ERROR);
+        return Transactions.readOnly(dataSource.get(), c -> {
+            AccountRepository.Summary summary = accounts.summarize(c, customerScope, q);
+            List<Account> items = accounts.search(c, customerScope, q, (page - 1) * size, size);
+            Map<String, Object> m = new LinkedHashMap<>();
+            m.put("items", items);
+            m.put("page", page);
+            m.put("size", size);
+            m.put("total", summary.count);
+            m.put("hasNext", (long) page * size < summary.count);
+            m.put("totalBalance", summary.totalBalance);
+            return m;
+        });
+    }
+
+    /** 口座の名義人（顧客番号）。アクセス権の確認用。 */
+    public String accountOwner(String accountNo) {
+        return getAccount(accountNo).getCustomerId();
     }
 
     public Account getAccount(String accountNo) {
@@ -112,6 +147,7 @@ public class BankService {
             LocalDateTime now = LocalDateTime.now(clock);
             registerRequest(c, idempotencyKey, TxType.DEPOSIT.name(), now, requests);
             Account account = lockActive(c, accounts, accountNo);
+            requireYenTransactional(account);
             BigDecimal balance = account.getBalance().add(amount);
             accounts.updateBalance(c, accountNo, balance, now, true);
             transactions.insert(c, accountNo, TxType.DEPOSIT, amount, balance, null, memo, idempotencyKey, now);
@@ -125,7 +161,10 @@ public class BankService {
             LocalDateTime now = LocalDateTime.now(clock);
             registerRequest(c, idempotencyKey, TxType.WITHDRAWAL.name(), now, requests);
             Account account = lockActive(c, accounts, accountNo);
+            requireYenTransactional(account);
             BigDecimal balance = debit(account, amount);
+            checkDailyOutflow(c, accountNo, amount, now);
+            consumeNoticeIfRequired(c, account, amount, now.toLocalDate(), notices);
             accounts.updateBalance(c, accountNo, balance, now, true);
             transactions.insert(c, accountNo, TxType.WITHDRAWAL, amount, balance, null, memo, idempotencyKey, now);
             return new OperationResult(TxType.WITHDRAWAL.name(), accountNo, null, amount, balance, Timestamps.format(now));
@@ -160,7 +199,11 @@ public class BankService {
                 throw new BankException(ErrorCode.NOT_OWN_ACCOUNT, toAccountNo);
             }
 
+            requireYenTransactional(from);
+            requireYenTransactional(to);
             BigDecimal fromBalance = debit(from, amount);
+            checkDailyOutflow(c, fromAccountNo, amount, now);
+            consumeNoticeIfRequired(c, from, amount, now.toLocalDate(), notices);
             BigDecimal toBalance = to.getBalance().add(amount);
             // Batched: 2 updates + 2 inserts in 2 round trips (instead of 4) while both rows are locked.
             accounts.updateBalances(c, fromAccountNo, fromBalance, toAccountNo, toBalance, now);
@@ -168,6 +211,15 @@ public class BankService {
                     idempotencyKey, now);
             return new OperationResult("TRANSFER", fromAccountNo, toAccountNo, amount, fromBalance, Timestamps.format(now));
         });
+    }
+
+    /** 当日の出金・振込（出）の合計 + 今回の金額が日次上限を超えないか（口座行ロック中に判定するため同時実行でも正確）。 */
+    private void checkDailyOutflow(Connection c, String accountNo, BigDecimal amount, LocalDateTime now)
+            throws SQLException {
+        BigDecimal today = transactions.outflowSince(c, accountNo, now.toLocalDate().atStartOfDay());
+        if (today.add(amount).compareTo(DAILY_OUTFLOW_LIMIT) > 0) {
+            throw new BankException(ErrorCode.DAILY_LIMIT_EXCEEDED, accountNo);
+        }
     }
 
     private Account findAccount(Connection c, String accountNo) throws SQLException {
@@ -197,10 +249,36 @@ public class BankService {
         return account;
     }
 
+    /** 出金後の残高。当座預金は当座貸越の極度額までマイナスにできる。 */
     static BigDecimal debit(Account account, BigDecimal amount) {
         BigDecimal balance = account.getBalance().subtract(amount);
-        if (balance.signum() < 0) throw new BankException(ErrorCode.INSUFFICIENT_FUNDS, account.getAccountNo());
+        if (balance.add(account.getOverdraftLimit()).signum() < 0) {
+            throw new BankException(ErrorCode.INSUFFICIENT_FUNDS, account.getAccountNo());
+        }
         return balance;
+    }
+
+    /** 入金・出金・振込・振替ができる円口座か（定期預金・外貨預金はそれぞれ専用の手続きで行う）。 */
+    static void requireYenTransactional(Account account) {
+        if ("TIME".equals(account.getAccountType()) || "FOREIGN".equals(account.getAccountType())) {
+            throw new BankException(ErrorCode.ACCOUNT_TYPE_NOT_ALLOWED, account.getAccountNo());
+        }
+        if (!account.isJpy()) throw new BankException(ErrorCode.CURRENCY_MISMATCH, account.getAccountNo());
+    }
+
+    /**
+     * 通知預金の払出し: 据置期間（預入から 7 日）経過後、払出可能日を過ぎた通知（金額以上）が必要。使った通知は消し込む。
+     */
+    static void consumeNoticeIfRequired(Connection c, Account account, BigDecimal amount, LocalDate today,
+                                        NoticeRepository notices) throws SQLException {
+        if (!"NOTICE".equals(account.getAccountType())) return;
+        LocalDate opened = LocalDateTime.parse(account.getOpenedAt()).toLocalDate();
+        if (today.isBefore(opened.plusDays(NOTICE_HOLD_DAYS))) {
+            throw new BankException(ErrorCode.NOTICE_REQUIRED, account.getAccountNo());
+        }
+        if (!notices.consume(c, account.getAccountNo(), amount, today)) {
+            throw new BankException(ErrorCode.NOTICE_REQUIRED, account.getAccountNo());
+        }
     }
 
     static void checkAmount(BigDecimal amount) {

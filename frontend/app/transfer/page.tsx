@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useEffect, useState } from "react";
+import { useAuth } from "@/components/AuthProvider";
 import { ErrorBox, Loading, SuccessBox } from "@/components/Feedback";
 import { ApiError, bankApi, newIdempotencyKey, prefetchAccountDetail, useAccounts } from "@/lib/api";
 import { formatDateTime, formatYen, normalizeAmount } from "@/lib/format";
@@ -12,8 +13,11 @@ type Step = "input" | "confirm" | "done";
 type Kind = "transfer" | "own";
 
 export default function TransferPage() {
-  // Usually already cached by the list page, so the form appears immediately
-  const { data: accounts, error: loadError } = useAccounts();
+  const { user } = useAuth();
+  // Customers: only their own accounts come back. Staff: used for input suggestions only.
+  const { data: accountPage, error: loadError } = useAccounts({ size: 200 });
+  const accounts = accountPage?.items;
+  const isCustomer = user?.customer ?? false;
   const [step, setStep] = useState<Step>("input");
   const [kind, setKind] = useState<Kind>("transfer");
   const [from, setFrom] = useState("");
@@ -25,12 +29,12 @@ export default function TransferPage() {
   const [error, setError] = useState<unknown>(null);
   const [result, setResult] = useState<OperationResult | null>(null);
 
-  // Default the source account once the list is known
+  // Default the source account once the list is known (customers choose from their own accounts)
   useEffect(() => {
-    if (from || !accounts) return;
+    if (from || !accounts || !isCustomer) return;
     const firstActive = accounts.find((a) => a.status === "ACTIVE");
     if (firstActive) setFrom(firstActive.accountNo);
-  }, [accounts, from]);
+  }, [accounts, from, isCustomer]);
 
   if (!accounts) return loadError ? <ErrorBox error={loadError} /> : <Loading />;
 
@@ -45,6 +49,7 @@ export default function TransferPage() {
   const toConfirm = (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
+    if (!/^\d{7}$/.test(from)) return setError(new ApiError(400, "VALIDATION_ERROR", `${label}元口座番号は7桁の数字で入力してください。`));
     if (!/^\d{7}$/.test(to)) return setError(new ApiError(400, "VALIDATION_ERROR", `${label}先口座番号は7桁の数字で入力してください。`));
     if (from === to) return setError(new ApiError(422, "SAME_ACCOUNT", `${label}元と${label}先に同じ口座は指定できません。`));
     if (!/^[1-9]\d{0,8}$/.test(normalized)) return setError(new ApiError(400, "VALIDATION_ERROR", "金額は1円以上の整数で入力してください。"));
@@ -102,15 +107,20 @@ export default function TransferPage() {
           <form onSubmit={toConfirm}>
             <label>
               {label}元口座
-              <select value={from} onChange={(e) => { setFrom(e.target.value); if (kind === "own") setTo(""); }} required>
-                {active.map((a) => (
-                  <option key={a.accountNo} value={a.accountNo}>
-                    {a.accountNo} {a.customerName}（残高 {formatYen(a.balance)}）
-                  </option>
-                ))}
-              </select>
+              {isCustomer ? (
+                <select value={from} onChange={(e) => { setFrom(e.target.value); if (kind === "own") setTo(""); }} required>
+                  {active.map((a) => (
+                    <option key={a.accountNo} value={a.accountNo}>
+                      {a.accountNo}（残高 {formatYen(a.balance)}）
+                    </option>
+                  ))}
+                </select>
+              ) : (
+                <input inputMode="numeric" autoComplete="off" required maxLength={7} value={from}
+                  onChange={(e) => setFrom(normalizeAmount(e.target.value))} placeholder="1000001" />
+              )}
             </label>
-            {kind === "own" ? (
+            {kind === "own" && isCustomer ? (
               <label>
                 振替先口座
                 <select value={to} onChange={(e) => setTo(e.target.value)} required>
@@ -125,7 +135,7 @@ export default function TransferPage() {
               </label>
             ) : (
             <label>
-              振込先口座番号
+              {label}先口座番号
               <input
                 inputMode="numeric"
                 autoComplete="off"
@@ -134,16 +144,10 @@ export default function TransferPage() {
                 value={to}
                 onChange={(e) => setTo(normalizeAmount(e.target.value))}
                 placeholder="1000003"
-                list="account-list"
               />
-              <datalist id="account-list">
-                {accounts.map((a) => (
-                  <option key={a.accountNo} value={a.accountNo}>
-                    {a.customerName}
-                  </option>
-                ))}
-              </datalist>
-              <span className="hint">7桁の数字</span>
+              <span className="hint">
+                7桁の数字{kind === "own" ? "（振込元と同じ名義の口座のみ）" : ""}
+              </span>
             </label>
             )}
             <label>

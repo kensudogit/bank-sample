@@ -21,7 +21,7 @@ public class CustomerRepository {
 
     private static final String SELECT =
             "SELECT customer_id, name, name_kana, birth_date, postal_code, address, phone, id_doc_type, id_doc_last4, "
-          + "kyc_status, kyc_decided_at, kyc_note, created_at FROM customer ";
+          + "kyc_status, kyc_decided_at, kyc_note, created_at, registered_by, kyc_decided_by, customer_type FROM customer ";
 
     public String nextCustomerId(Connection c) throws SQLException {
         try (PreparedStatement ps = c.prepareStatement("SELECT customer_seq.NEXTVAL FROM dual");
@@ -32,9 +32,11 @@ public class CustomerRepository {
     }
 
     /** 本人確認書類の番号は保存しない（下 4 桁のみ）。 */
-    public void insert(Connection c, String customerId, NewCustomer n, LocalDateTime now) throws SQLException {
+    public void insert(Connection c, String customerId, NewCustomer n, String registeredBy, LocalDateTime now)
+            throws SQLException {
         String sql = "INSERT INTO customer (customer_id, name, name_kana, birth_date, postal_code, address, phone, "
-                   + "id_doc_type, id_doc_last4, kyc_status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', ?)";
+                   + "id_doc_type, id_doc_last4, kyc_status, created_at, registered_by, customer_type) "
+                   + "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', ?, ?, ?)";
         try (PreparedStatement ps = c.prepareStatement(sql)) {
             ps.setString(1, customerId);
             ps.setString(2, n.name);
@@ -46,6 +48,8 @@ public class CustomerRepository {
             ps.setString(8, n.idDocType);
             ps.setString(9, n.idDocNumber.substring(n.idDocNumber.length() - 4));
             ps.setTimestamp(10, Timestamp.valueOf(now));
+            ps.setString(11, registeredBy);
+            ps.setString(12, n.customerType == null ? "INDIVIDUAL" : n.customerType);
             ps.executeUpdate();
         }
     }
@@ -82,14 +86,15 @@ public class CustomerRepository {
         return one(c, SELECT + "WHERE customer_id = ? FOR UPDATE", customerId);
     }
 
-    public void decideKyc(Connection c, String customerId, String status, String note, LocalDateTime now)
-            throws SQLException {
-        try (PreparedStatement ps = c.prepareStatement(
-                "UPDATE customer SET kyc_status = ?, kyc_note = ?, kyc_decided_at = ? WHERE customer_id = ?")) {
+    public void decideKyc(Connection c, String customerId, String status, String note, String decidedBy,
+                          LocalDateTime now) throws SQLException {
+        try (PreparedStatement ps = c.prepareStatement("UPDATE customer SET kyc_status = ?, kyc_note = ?, "
+                + "kyc_decided_at = ?, kyc_decided_by = ? WHERE customer_id = ?")) {
             ps.setString(1, status);
             ps.setString(2, note);
             ps.setTimestamp(3, Timestamp.valueOf(now));
-            ps.setString(4, customerId);
+            ps.setString(4, decidedBy);
+            ps.setString(5, customerId);
             if (ps.executeUpdate() != 1) throw new SQLException("customer row not updated: " + customerId);
         }
     }
@@ -119,6 +124,8 @@ public class CustomerRepository {
                 Timestamps.format(rs.getTimestamp("kyc_decided_at")),
                 rs.getString("kyc_note"),
                 Timestamps.format(rs.getTimestamp("created_at")),
-                null);
+                rs.getString("registered_by"),
+                rs.getString("kyc_decided_by"),
+                null).withCustomerType(rs.getString("customer_type"));
     }
 }

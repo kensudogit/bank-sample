@@ -3,12 +3,16 @@
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import { useState } from "react";
+import { useAuth } from "@/components/AuthProvider";
 import { ErrorBox, Loading, SuccessBox } from "@/components/Feedback";
 import { ApiError, bankApi, newIdempotencyKey, useAccountDetail } from "@/lib/api";
 import { CloseAccount, ReactivateAccount } from "@/components/AccountLifecycle";
+import { BalanceChart } from "@/components/BalanceChart";
+import { DepositPanels } from "@/components/DepositPanels";
+import { IconArrowLeft, IconTransfer } from "@/components/Icons";
 import { InterestPreview } from "@/components/InterestPreview";
 import { TransactionHistory } from "@/components/TransactionHistory";
-import { accountTypeLabel, formatDate, formatYen, normalizeAmount, statusLabel } from "@/lib/format";
+import { accountTypeLabel, formatDate, formatMoney, formatYen, normalizeAmount, statusLabel } from "@/lib/format";
 import type { OperationResult } from "@/lib/types";
 
 type Mode = "deposit" | "withdraw";
@@ -17,13 +21,18 @@ export default function AccountDetailPage() {
   const { accountNo } = useParams<{ accountNo: string }>();
   // Cached (and possibly prefetched from the list page); refreshed automatically after deposit / withdraw
   const { data: detail, error: loadError } = useAccountDetail(accountNo);
+  const { user } = useAuth();
+  const isStaff = user?.staff ?? false;
+  const isSupervisor = user?.role === "SUPERVISOR";
 
   if (!detail) {
     if (!loadError) return <Loading />;
     return (
       <>
         <ErrorBox error={loadError} />
-        <Link href="/">口座一覧へ戻る</Link>
+        <Link href="/" className="back-link">
+          <IconArrowLeft size={16} /> 口座一覧へ戻る
+        </Link>
       </>
     );
   }
@@ -31,68 +40,81 @@ export default function AccountDetailPage() {
   const { account } = detail;
   return (
     <>
-      <p>
-        <Link href="/">← 口座一覧</Link>
-      </p>
-      <h1>口座詳細 {account.accountNo}</h1>
+      <Link href="/" className="back-link">
+        <IconArrowLeft size={16} /> {isStaff ? "口座一覧" : "ご利用口座"}
+      </Link>
       {/* A failed background refresh keeps the last data on screen and reports the problem */}
       <ErrorBox error={loadError} />
 
-      <section className="card">
-        <dl className="summary">
-          <div>
-            <dt>名義</dt>
-            <dd>
-              <Link href={`/customers/${account.customerId}`}>{account.customerName}</Link>
-              <span className="muted">（{account.customerId}）</span>
-            </dd>
-          </div>
-          <div>
-            <dt>種別</dt>
-            <dd>{accountTypeLabel[account.accountType]}</dd>
-          </div>
-          <div>
-            <dt>状態</dt>
-            <dd>
-              <span className={`badge badge-${account.status}`}>{statusLabel[account.status]}</span>
-            </dd>
-          </div>
-          <div>
-            <dt>残高</dt>
-            <dd className="balance">{formatYen(account.balance)}</dd>
-          </div>
-          <div>
-            <dt>開設日</dt>
-            <dd>{formatDate(account.openedAt)}</dd>
-          </div>
-          <div>
-            <dt>最終異動日</dt>
-            <dd>{formatDate(account.lastActivityAt)}</dd>
-          </div>
+      <section className="hero" aria-label="口座の概要">
+        <div className="tile-top" style={{ position: "relative" }}>
+          <span className="hero-label">
+            {accountTypeLabel[account.accountType]}預金{account.currency !== "JPY" ? `（${account.currency}）` : ""} ・ No.{" "}
+            {account.accountNo}
+          </span>
+          <span className="chip">{statusLabel[account.status]}</span>
+        </div>
+        <div className="hero-amount">{formatMoney(account.balance, account.currency)}</div>
+        <div className="hero-meta">
+          <span>
+            名義{" "}
+            {isStaff ? (
+              <Link href={`/customers/${account.customerId}`} style={{ color: "#fff", fontWeight: 700 }}>
+                {account.customerName}
+              </Link>
+            ) : (
+              <strong>{account.customerName}</strong>
+            )}
+          </span>
+          <span>
+            開設日 <strong>{formatDate(account.openedAt)}</strong>
+          </span>
+          <span>
+            最終異動日 <strong>{formatDate(account.lastActivityAt)}</strong>
+          </span>
           {account.dormancyNotifiedAt && (
-            <div>
-              <dt>休眠前通知</dt>
-              <dd>{formatDate(account.dormancyNotifiedAt)}</dd>
-            </div>
+            <span>
+              休眠前通知 <strong>{formatDate(account.dormancyNotifiedAt)}</strong>
+            </span>
           )}
           {account.closedAt && (
-            <div>
-              <dt>解約日</dt>
-              <dd>{formatDate(account.closedAt)}</dd>
-            </div>
+            <span>
+              解約日 <strong>{formatDate(account.closedAt)}</strong>
+            </span>
           )}
-        </dl>
+        </div>
+        {account.status === "ACTIVE" && account.currency === "JPY" && account.accountType !== "TIME" && (
+          <div className="hero-actions">
+            <Link className="btn btn-small" href="/transfer">
+              <IconTransfer size={16} /> 振込・振替
+            </Link>
+          </div>
+        )}
       </section>
 
-      {account.status === "ACTIVE" && <CashForm accountNo={account.accountNo} />}
+      {/* Cash deposit / withdrawal is a counter operation (staff only); customers use transfers */}
+      <DepositPanels account={account} />
+      {account.status === "ACTIVE" && isStaff && account.currency === "JPY" && account.accountType !== "TIME" && (
+        <CashForm accountNo={account.accountNo} />
+      )}
       {account.status === "FROZEN" && (
         <div className="alert alert-error">この口座は凍結中のため、お取引できません。</div>
       )}
-      {account.status === "DORMANT" && <ReactivateAccount account={account} />}
+      {account.status === "DORMANT" &&
+        (isSupervisor ? (
+          <ReactivateAccount account={account} />
+        ) : (
+          <div className="alert alert-error">この口座は休眠中です。お取引の再開は窓口でお申し出ください。</div>
+        ))}
 
-      {account.status !== "CLOSED" && <InterestPreview accountNo={account.accountNo} />}
-      <TransactionHistory accountNo={account.accountNo} />
-      {(account.status === "ACTIVE" || account.status === "CLOSED") && <CloseAccount account={account} />}
+      <BalanceChart accountNo={account.accountNo} currentBalance={account.balance} currency={account.currency} />
+      {account.status !== "CLOSED" && account.accountType !== "TIME" && account.accountType !== "CHECKING" && (
+        <InterestPreview accountNo={account.accountNo} currency={account.currency} />
+      )}
+      <TransactionHistory accountNo={account.accountNo} currency={account.currency} />
+      {isSupervisor && account.accountType !== "TIME" && (account.status === "ACTIVE" || account.status === "CLOSED") && (
+        <CloseAccount account={account} />
+      )}
     </>
   );
 }

@@ -29,12 +29,16 @@ public class TransferAction extends MoneyOperationAction {
     @Override
     public String execute() {
         try {
+            requireAccountAccess(fromAccountNo);   // customers can only send from their own accounts
             return ok(service.transfer(fromAccountNo, toAccountNo, amountValue(), getMemo(), getIdempotencyKey(),
                     ownAccountsOnly));
         } catch (BankException e) {
             return fail(e);
         }
     }
+
+    @Override
+    public String getAuditTarget() { return fromAccountNo + "->" + toAccountNo + " " + getAmount(); }
 
     /** true: 振替（同じ顧客の口座間に限る） */
     public boolean isOwnAccountsOnly() { return ownAccountsOnly; }

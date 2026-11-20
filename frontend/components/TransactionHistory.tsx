@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { ErrorBox, Loading } from "@/components/Feedback";
 import { bankApi, useTransactions, type TransactionQuery } from "@/lib/api";
-import { creditTypes, formatDateTime, formatNumber, formatYen, txTypeLabel } from "@/lib/format";
+import { creditTypes, formatDateTime, formatMoney, formatNumber, txTypeLabel } from "@/lib/format";
 import type { AccountTransaction, TxType } from "@/lib/types";
 
 const PAGE_SIZE = 20;
@@ -16,7 +16,7 @@ interface Filter {
 }
 
 /** 取引履歴: 期間・種別で絞り込み、ページ送り、期首／期末残高と入出金合計、CSV 出力。 */
-export function TransactionHistory({ accountNo }: { accountNo: string }) {
+export function TransactionHistory({ accountNo, currency = "JPY" }: { accountNo: string; currency?: string }) {
   const [draft, setDraft] = useState<Filter>({ from: "", to: "", types: [] });
   const [filter, setFilter] = useState<Filter>(draft);
   const [page, setPage] = useState(1);
@@ -103,19 +103,19 @@ export function TransactionHistory({ accountNo }: { accountNo: string }) {
           <dl className="stats">
             <div className="stat">
               <dt>{filter.from ? `期首残高（${filter.from} 開始時）` : "期首残高"}</dt>
-              <dd>{filter.from ? formatYen(data.openingBalance) : "—"}</dd>
+              <dd>{filter.from ? formatMoney(data.openingBalance, currency) : "—"}</dd>
             </div>
             <div className="stat">
               <dt>入金合計</dt>
-              <dd className="plus">{formatYen(data.totalIn)}</dd>
+              <dd className="plus">{formatMoney(data.totalIn, currency)}</dd>
             </div>
             <div className="stat">
               <dt>出金合計</dt>
-              <dd className="minus">{formatYen(data.totalOut)}</dd>
+              <dd className="minus">{formatMoney(data.totalOut, currency)}</dd>
             </div>
             <div className="stat">
               <dt>{filter.to ? `期末残高（${filter.to} 終了時）` : "現在残高"}</dt>
-              <dd>{formatYen(data.closingBalance)}</dd>
+              <dd>{formatMoney(data.closingBalance, currency)}</dd>
             </div>
           </dl>
 
@@ -143,9 +143,9 @@ export function TransactionHistory({ accountNo }: { accountNo: string }) {
                         <td>{txTypeLabel[t.txType]}</td>
                         <td className={`num ${plus ? "plus" : "minus"}`}>
                           {plus ? "+" : "−"}
-                          {formatYen(t.amount)}
+                          {formatMoney(t.amount, currency)}
                         </td>
-                        <td className="num">{formatYen(t.balanceAfter)}</td>
+                        <td className="num">{formatMoney(t.balanceAfter, currency)}</td>
                         <td>{t.counterpartyAccountNo ?? ""}</td>
                         <td>{t.memo ?? ""}</td>
                       </tr>

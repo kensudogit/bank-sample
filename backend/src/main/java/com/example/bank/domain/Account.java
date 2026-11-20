@@ -16,10 +16,20 @@ public final class Account {
     private final String lastActivityAt;
     private final String dormancyNotifiedAt;
     private final String dormantAt;
+    private final String currency;
+    private final BigDecimal overdraftLimit;
 
     public Account(String accountNo, String customerId, String customerName, String accountType,
                    BigDecimal balance, String status, String updatedAt, String openedAt, String closedAt,
                    String lastActivityAt, String dormancyNotifiedAt, String dormantAt) {
+        this(accountNo, customerId, customerName, accountType, balance, status, updatedAt, openedAt, closedAt,
+                lastActivityAt, dormancyNotifiedAt, dormantAt, "JPY", BigDecimal.ZERO);
+    }
+
+    public Account(String accountNo, String customerId, String customerName, String accountType,
+                   BigDecimal balance, String status, String updatedAt, String openedAt, String closedAt,
+                   String lastActivityAt, String dormancyNotifiedAt, String dormantAt, String currency,
+                   BigDecimal overdraftLimit) {
         this.accountNo = accountNo;
         this.customerId = customerId;
         this.customerName = customerName;
@@ -32,6 +42,8 @@ public final class Account {
         this.lastActivityAt = lastActivityAt;
         this.dormancyNotifiedAt = dormancyNotifiedAt;
         this.dormantAt = dormantAt;
+        this.currency = currency;
+        this.overdraftLimit = overdraftLimit;
     }
 
     public String getAccountNo() { return accountNo; }
@@ -48,5 +60,13 @@ public final class Account {
     public String getDormancyNotifiedAt() { return dormancyNotifiedAt; }
     public String getDormantAt() { return dormantAt; }
 
+    /** 通貨（JPY / USD / EUR）。残高・金額はその通貨の最小単位（円・セント） */
+    public String getCurrency() { return currency; }
+    /** 当座貸越の極度額（当座預金のみ。残高はこの額までマイナスにできる） */
+    public BigDecimal getOverdraftLimit() { return overdraftLimit; }
+    /** 引出可能額（当座貸越の未使用枠を含む） */
+    public BigDecimal getAvailableBalance() { return balance.add(overdraftLimit); }
+
     public boolean isActive() { return "ACTIVE".equals(status); }
+    public boolean isJpy() { return "JPY".equals(currency); }
 }

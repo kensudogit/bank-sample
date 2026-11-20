@@ -18,13 +18,28 @@
   <constant name="struts.custom.i18n.resources" value="messages"/>
   <constant name="struts.locale" value="ja_JP"/>
 
+  <!--
+    Access control (apiGuardRead.roles / apiGuardWrite.roles):
+      PUBLIC        no login (health, login, me)
+      AUTHENTICATED any logged-in user; customers are further limited to their own accounts in the Action
+      CUSTOMER / TELLER / SUPERVISOR  listed roles only
+    The interceptor default is AUTHENTICATED, so an action without a role setting is never public.
+    Audit: every POST is audited; apiGuardRead.audit=true adds a GET (e.g. viewing customer personal data).
+  -->
   <package name="api" namespace="/api" extends="json-default">
 
     <interceptors>
-      <interceptor name="apiGuard" class="com.example.bank.interceptor.ApiGuardInterceptor"/>
+      <!-- allowedMethods is set on the interceptor definitions (not in the stacks) so that it survives
+           per-action parameter overrides such as apiGuardWrite.roles -->
+      <interceptor name="apiGuardRead" class="com.example.bank.interceptor.ApiGuardInterceptor">
+        <param name="allowedMethods">GET</param>
+      </interceptor>
+      <interceptor name="apiGuardWrite" class="com.example.bank.interceptor.ApiGuardInterceptor">
+        <param name="allowedMethods">POST</param>
+      </interceptor>
 
       <interceptor-stack name="apiReadStack">
-        <interceptor-ref name="apiGuard"><param name="allowedMethods">GET</param></interceptor-ref>
+        <interceptor-ref name="apiGuardRead"/>
         <interceptor-ref name="defaultStack">
           <param name="exception.logEnabled">true</param>
           <param name="exception.logLevel">ERROR</param>
@@ -32,7 +47,7 @@
       </interceptor-stack>
 
       <interceptor-stack name="apiWriteStack">
-        <interceptor-ref name="apiGuard"><param name="allowedMethods">POST</param></interceptor-ref>
+        <interceptor-ref name="apiGuardWrite"/>
         <!-- Populates the Action from the JSON request body -->
         <interceptor-ref name="json">
           <param name="enableSMD">false</param>
@@ -51,6 +66,7 @@
       <result name="success" type="json"><param name="root">response</param></result>
       <result name="input" type="json"><param name="root">response</param><param name="statusCode">400</param></result>
       <result name="badRequest" type="json"><param name="root">response</param><param name="statusCode">400</param></result>
+      <result name="unauthorized" type="json"><param name="root">response</param><param name="statusCode">401</param></result>
       <result name="forbidden" type="json"><param name="root">response</param><param name="statusCode">403</param></result>
       <result name="notFound" type="json"><param name="root">response</param><param name="statusCode">404</param></result>
       <result name="methodNotAllowed" type="json"><param name="root">response</param><param name="statusCode">405</param></result>
@@ -63,52 +79,245 @@
       <exception-mapping exception="java.lang.Exception" result="systemError"/>
     </global-exception-mappings>
 
-    <action name="health" class="com.example.bank.action.HealthAction"/>
+    <!-- ===== Public ===== -->
+    <action name="health" class="com.example.bank.action.HealthAction">
+      <interceptor-ref name="apiReadStack"><param name="apiGuardRead.roles">PUBLIC</param></interceptor-ref>
+    </action>
+    <action name="me" class="com.example.bank.action.AuthAction" method="me">
+      <interceptor-ref name="apiReadStack"><param name="apiGuardRead.roles">PUBLIC</param></interceptor-ref>
+    </action>
+    <action name="login" class="com.example.bank.action.AuthAction" method="login">
+      <interceptor-ref name="apiWriteStack"><param name="apiGuardWrite.roles">PUBLIC</param></interceptor-ref>
+    </action>
+
+    <!-- ===== Any logged-in user (allowed while an initial password must be changed) ===== -->
+    <action name="logout" class="com.example.bank.action.AuthAction" method="logout">
+      <interceptor-ref name="apiWriteStack">
+        <param name="apiGuardWrite.roles">AUTHENTICATED</param>
+        <param name="apiGuardWrite.allowDuringPasswordChange">true</param>
+      </interceptor-ref>
+    </action>
+    <action name="password-change" class="com.example.bank.action.AuthAction" method="changePassword">
+      <interceptor-ref name="apiWriteStack">
+        <param name="apiGuardWrite.roles">AUTHENTICATED</param>
+        <param name="apiGuardWrite.allowDuringPasswordChange">true</param>
+      </interceptor-ref>
+    </action>
+
+    <!-- ===== Customers (own accounts only) and staff ===== -->
     <action name="accounts" class="com.example.bank.action.AccountsAction"/>
     <action name="account" class="com.example.bank.action.AccountDetailAction"/>
-
-    <action name="deposit" class="com.example.bank.action.CashAction" method="deposit">
-      <interceptor-ref name="apiWriteStack"/>
-    </action>
-    <action name="withdraw" class="com.example.bank.action.CashAction" method="withdraw">
-      <interceptor-ref name="apiWriteStack"/>
+    <action name="transactions" class="com.example.bank.action.TransactionsAction"/>
+    <action name="interest-preview" class="com.example.bank.action.InterestAction" method="preview"/>
+    <action name="customer" class="com.example.bank.action.CustomersAction" method="detail">
+      <interceptor-ref name="apiReadStack"><param name="apiGuardRead.audit">true</param></interceptor-ref>
     </action>
     <action name="transfer" class="com.example.bank.action.TransferAction">
       <interceptor-ref name="apiWriteStack"/>
     </action>
 
-    <!-- 取引履歴・利息照会 -->
-    <action name="transactions" class="com.example.bank.action.TransactionsAction"/>
-    <action name="interest-preview" class="com.example.bank.action.InterestAction" method="preview"/>
-
-    <!-- 顧客・本人確認・口座開設 -->
-    <action name="customers" class="com.example.bank.action.CustomersAction"/>
-    <action name="customer" class="com.example.bank.action.CustomersAction" method="detail"/>
-    <action name="customer-register" class="com.example.bank.action.CustomerRegisterAction">
-      <interceptor-ref name="apiWriteStack"/>
+    <!-- ===== Tellers and supervisors ===== -->
+    <action name="customers" class="com.example.bank.action.CustomersAction">
+      <interceptor-ref name="apiReadStack"><param name="apiGuardRead.roles">TELLER,SUPERVISOR</param></interceptor-ref>
     </action>
-    <action name="customer-kyc" class="com.example.bank.action.KycDecisionAction">
-      <interceptor-ref name="apiWriteStack"/>
+    <action name="deposit" class="com.example.bank.action.CashAction" method="deposit">
+      <interceptor-ref name="apiWriteStack"><param name="apiGuardWrite.roles">TELLER,SUPERVISOR</param></interceptor-ref>
+    </action>
+    <action name="withdraw" class="com.example.bank.action.CashAction" method="withdraw">
+      <interceptor-ref name="apiWriteStack"><param name="apiGuardWrite.roles">TELLER,SUPERVISOR</param></interceptor-ref>
+    </action>
+    <action name="customer-register" class="com.example.bank.action.CustomerRegisterAction">
+      <interceptor-ref name="apiWriteStack"><param name="apiGuardWrite.roles">TELLER,SUPERVISOR</param></interceptor-ref>
     </action>
     <action name="account-open" class="com.example.bank.action.AccountOpenAction">
-      <interceptor-ref name="apiWriteStack"/>
+      <interceptor-ref name="apiWriteStack"><param name="apiGuardWrite.roles">TELLER,SUPERVISOR</param></interceptor-ref>
+    </action>
+    <action name="customer-login-issue" class="com.example.bank.action.AdminAction" method="issueLogin">
+      <interceptor-ref name="apiWriteStack"><param name="apiGuardWrite.roles">TELLER,SUPERVISOR</param></interceptor-ref>
     </action>
 
-    <!-- 解約・休眠 -->
+    <!-- ===== Supervisors only (approval / batch / audit) ===== -->
+    <action name="customer-kyc" class="com.example.bank.action.KycDecisionAction">
+      <interceptor-ref name="apiWriteStack"><param name="apiGuardWrite.roles">SUPERVISOR</param></interceptor-ref>
+    </action>
     <action name="account-close" class="com.example.bank.action.AccountLifecycleAction" method="close">
-      <interceptor-ref name="apiWriteStack"/>
+      <interceptor-ref name="apiWriteStack"><param name="apiGuardWrite.roles">SUPERVISOR</param></interceptor-ref>
     </action>
     <action name="account-reactivate" class="com.example.bank.action.AccountLifecycleAction" method="reactivate">
-      <interceptor-ref name="apiWriteStack"/>
+      <interceptor-ref name="apiWriteStack"><param name="apiGuardWrite.roles">SUPERVISOR</param></interceptor-ref>
     </action>
-    <action name="dormancy" class="com.example.bank.action.DormancyAction" method="report"/>
+    <action name="interest-settle" class="com.example.bank.action.InterestAction" method="settle">
+      <interceptor-ref name="apiWriteStack"><param name="apiGuardWrite.roles">SUPERVISOR</param></interceptor-ref>
+    </action>
+    <action name="dormancy" class="com.example.bank.action.DormancyAction" method="report">
+      <interceptor-ref name="apiReadStack"><param name="apiGuardRead.roles">SUPERVISOR</param></interceptor-ref>
+    </action>
     <action name="dormancy-run" class="com.example.bank.action.DormancyAction" method="run">
-      <interceptor-ref name="apiWriteStack"/>
+      <interceptor-ref name="apiWriteStack"><param name="apiGuardWrite.roles">SUPERVISOR</param></interceptor-ref>
+    </action>
+    <action name="audit-log" class="com.example.bank.action.AdminAction" method="auditLog">
+      <interceptor-ref name="apiReadStack">
+        <param name="apiGuardRead.roles">SUPERVISOR</param>
+        <param name="apiGuardRead.audit">true</param>
+      </interceptor-ref>
+    </action>
+    <action name="audit-verify" class="com.example.bank.action.AdminAction" method="auditVerify">
+      <interceptor-ref name="apiReadStack">
+        <param name="apiGuardRead.roles">SUPERVISOR</param>
+        <param name="apiGuardRead.audit">true</param>
+      </interceptor-ref>
+    </action>
+    <action name="jobs" class="com.example.bank.action.AdminAction" method="jobs">
+      <interceptor-ref name="apiReadStack"><param name="apiGuardRead.roles">SUPERVISOR</param></interceptor-ref>
+    </action>
+    <action name="jobs-run" class="com.example.bank.action.AdminAction" method="runJobs">
+      <interceptor-ref name="apiWriteStack"><param name="apiGuardWrite.roles">SUPERVISOR</param></interceptor-ref>
     </action>
 
-    <!-- 利息決算（バッチ） -->
-    <action name="interest-settle" class="com.example.bank.action.InterestAction" method="settle">
-      <interceptor-ref name="apiWriteStack"/>
+    <!-- ===== Deposit products ===== -->
+    <action name="time-rates" class="com.example.bank.action.DepositAction" method="timeRates"/>
+    <action name="time-open" class="com.example.bank.action.DepositAction" method="timeOpen">
+      <interceptor-ref name="apiWriteStack"></interceptor-ref>
+    </action>
+    <action name="time-deposit" class="com.example.bank.action.DepositAction" method="timeGet"/>
+    <action name="time-cancel" class="com.example.bank.action.DepositAction" method="timeCancel">
+      <interceptor-ref name="apiWriteStack"></interceptor-ref>
+    </action>
+    <action name="notice-create" class="com.example.bank.action.DepositAction" method="noticeCreate">
+      <interceptor-ref name="apiWriteStack"></interceptor-ref>
+    </action>
+    <action name="notice-cancel" class="com.example.bank.action.DepositAction" method="noticeCancel">
+      <interceptor-ref name="apiWriteStack"></interceptor-ref>
+    </action>
+    <action name="notices" class="com.example.bank.action.DepositAction" method="notices"/>
+    <action name="fx-rates" class="com.example.bank.action.DepositAction" method="fxRates"/>
+    <action name="fx-rate-update" class="com.example.bank.action.DepositAction" method="fxRateUpdate">
+      <interceptor-ref name="apiWriteStack"><param name="apiGuardWrite.roles">SUPERVISOR</param></interceptor-ref>
+    </action>
+    <action name="fx-exchange" class="com.example.bank.action.DepositAction" method="fxExchange">
+      <interceptor-ref name="apiWriteStack"></interceptor-ref>
+    </action>
+
+    <!-- ===== Loans ===== -->
+    <action name="loan-applications" class="com.example.bank.action.LoanAction" method="applications"/>
+    <action name="loan-application" class="com.example.bank.action.LoanAction" method="application"/>
+    <action name="loan-apply" class="com.example.bank.action.LoanAction" method="apply">
+      <interceptor-ref name="apiWriteStack"></interceptor-ref>
+    </action>
+    <action name="loan-screen" class="com.example.bank.action.LoanAction" method="screen">
+      <interceptor-ref name="apiWriteStack"><param name="apiGuardWrite.roles">TELLER,SUPERVISOR</param></interceptor-ref>
+    </action>
+    <action name="loan-decide" class="com.example.bank.action.LoanAction" method="decide">
+      <interceptor-ref name="apiWriteStack"><param name="apiGuardWrite.roles">SUPERVISOR</param></interceptor-ref>
+    </action>
+    <action name="loan-collateral" class="com.example.bank.action.LoanAction" method="collateral">
+      <interceptor-ref name="apiWriteStack"><param name="apiGuardWrite.roles">TELLER,SUPERVISOR</param></interceptor-ref>
+    </action>
+    <action name="loan-participant" class="com.example.bank.action.LoanAction" method="participant">
+      <interceptor-ref name="apiWriteStack"><param name="apiGuardWrite.roles">TELLER,SUPERVISOR</param></interceptor-ref>
+    </action>
+    <action name="loan-contract" class="com.example.bank.action.LoanAction" method="contract">
+      <interceptor-ref name="apiWriteStack"><param name="apiGuardWrite.roles">TELLER,SUPERVISOR</param></interceptor-ref>
+    </action>
+    <action name="loan-disburse" class="com.example.bank.action.LoanAction" method="disburse">
+      <interceptor-ref name="apiWriteStack"><param name="apiGuardWrite.roles">TELLER,SUPERVISOR</param></interceptor-ref>
+    </action>
+    <action name="loans" class="com.example.bank.action.LoanAction" method="loans"/>
+    <action name="loan" class="com.example.bank.action.LoanAction" method="loan"/>
+    <action name="loan-draw" class="com.example.bank.action.LoanAction" method="draw">
+      <interceptor-ref name="apiWriteStack"></interceptor-ref>
+    </action>
+    <action name="loan-repay" class="com.example.bank.action.LoanAction" method="repay">
+      <interceptor-ref name="apiWriteStack"></interceptor-ref>
+    </action>
+    <action name="loan-prepay" class="com.example.bank.action.LoanAction" method="prepay">
+      <interceptor-ref name="apiWriteStack"></interceptor-ref>
+    </action>
+    <action name="loan-collection" class="com.example.bank.action.LoanAction" method="collection">
+      <interceptor-ref name="apiWriteStack"><param name="apiGuardWrite.roles">TELLER,SUPERVISOR</param></interceptor-ref>
+    </action>
+    <action name="loan-writeoff" class="com.example.bank.action.LoanAction" method="writeOff">
+      <interceptor-ref name="apiWriteStack"><param name="apiGuardWrite.roles">SUPERVISOR</param></interceptor-ref>
+    </action>
+    <action name="loan-class" class="com.example.bank.action.LoanAction" method="setClass">
+      <interceptor-ref name="apiWriteStack"><param name="apiGuardWrite.roles">SUPERVISOR</param></interceptor-ref>
+    </action>
+    <action name="loan-process-due" class="com.example.bank.action.LoanAction" method="processDue">
+      <interceptor-ref name="apiWriteStack"><param name="apiGuardWrite.roles">SUPERVISOR</param></interceptor-ref>
+    </action>
+
+    <!-- ===== Payments: domestic (Zengin), direct debit, foreign ===== -->
+    <action name="banks" class="com.example.bank.action.PaymentAction" method="banks"/>
+    <action name="remit-send" class="com.example.bank.action.PaymentAction" method="send">
+      <interceptor-ref name="apiWriteStack"></interceptor-ref>
+    </action>
+    <action name="remittances" class="com.example.bank.action.PaymentAction" method="remittances"/>
+    <action name="remit-cancel" class="com.example.bank.action.PaymentAction" method="cancel">
+      <interceptor-ref name="apiWriteStack"></interceptor-ref>
+    </action>
+    <action name="remit-return" class="com.example.bank.action.PaymentAction" method="returnRemit">
+      <interceptor-ref name="apiWriteStack"><param name="apiGuardWrite.roles">TELLER,SUPERVISOR</param></interceptor-ref>
+    </action>
+    <action name="zengin-create" class="com.example.bank.action.PaymentAction" method="zenginCreate">
+      <interceptor-ref name="apiWriteStack"><param name="apiGuardWrite.roles">SUPERVISOR</param></interceptor-ref>
+    </action>
+    <action name="zengin-batches" class="com.example.bank.action.PaymentAction" method="zenginBatches">
+      <interceptor-ref name="apiReadStack"><param name="apiGuardRead.roles">SUPERVISOR</param></interceptor-ref>
+    </action>
+    <action name="zengin-batch" class="com.example.bank.action.PaymentAction" method="zenginBatch">
+      <interceptor-ref name="apiReadStack"><param name="apiGuardRead.roles">SUPERVISOR</param></interceptor-ref>
+    </action>
+    <action name="zengin-settle" class="com.example.bank.action.PaymentAction" method="zenginSettle">
+      <interceptor-ref name="apiWriteStack"><param name="apiGuardWrite.roles">SUPERVISOR</param></interceptor-ref>
+    </action>
+    <action name="remit-incoming" class="com.example.bank.action.PaymentAction" method="incoming">
+      <interceptor-ref name="apiWriteStack"><param name="apiGuardWrite.roles">SUPERVISOR</param></interceptor-ref>
+    </action>
+    <action name="remit-resolve" class="com.example.bank.action.PaymentAction" method="resolve">
+      <interceptor-ref name="apiWriteStack"><param name="apiGuardWrite.roles">SUPERVISOR</param></interceptor-ref>
+    </action>
+    <action name="billers" class="com.example.bank.action.PaymentAction" method="billers"/>
+    <action name="mandates" class="com.example.bank.action.PaymentAction" method="mandates"/>
+    <action name="mandate-create" class="com.example.bank.action.PaymentAction" method="mandateCreate">
+      <interceptor-ref name="apiWriteStack"></interceptor-ref>
+    </action>
+    <action name="mandate-cancel" class="com.example.bank.action.PaymentAction" method="mandateCancel">
+      <interceptor-ref name="apiWriteStack"></interceptor-ref>
+    </action>
+    <action name="billing-import" class="com.example.bank.action.PaymentAction" method="billingImport">
+      <interceptor-ref name="apiWriteStack"><param name="apiGuardWrite.roles">TELLER,SUPERVISOR</param></interceptor-ref>
+    </action>
+    <action name="debit-requests" class="com.example.bank.action.PaymentAction" method="debitRequests"/>
+    <action name="debit-process" class="com.example.bank.action.PaymentAction" method="debitProcess">
+      <interceptor-ref name="apiWriteStack"><param name="apiGuardWrite.roles">SUPERVISOR</param></interceptor-ref>
+    </action>
+    <action name="foreign-send" class="com.example.bank.action.PaymentAction" method="foreignSend">
+      <interceptor-ref name="apiWriteStack"></interceptor-ref>
+    </action>
+    <action name="foreign-remittances" class="com.example.bank.action.PaymentAction" method="foreignList"/>
+    <action name="foreign-remittance" class="com.example.bank.action.PaymentAction" method="foreignGet"/>
+    <action name="foreign-decide" class="com.example.bank.action.PaymentAction" method="foreignDecide">
+      <interceptor-ref name="apiWriteStack"><param name="apiGuardWrite.roles">SUPERVISOR</param></interceptor-ref>
+    </action>
+
+    <!-- ===== Risk / AML / CRM ===== -->
+    <action name="risk-dashboard" class="com.example.bank.action.RiskAction" method="dashboard">
+      <interceptor-ref name="apiReadStack"><param name="apiGuardRead.roles">SUPERVISOR</param></interceptor-ref>
+    </action>
+    <action name="aml-alerts" class="com.example.bank.action.RiskAction" method="alerts">
+      <interceptor-ref name="apiReadStack"><param name="apiGuardRead.roles">SUPERVISOR</param></interceptor-ref>
+    </action>
+    <action name="aml-alert-update" class="com.example.bank.action.RiskAction" method="alertUpdate">
+      <interceptor-ref name="apiWriteStack"><param name="apiGuardWrite.roles">SUPERVISOR</param></interceptor-ref>
+    </action>
+    <action name="aml-scan" class="com.example.bank.action.RiskAction" method="scan">
+      <interceptor-ref name="apiWriteStack"><param name="apiGuardWrite.roles">SUPERVISOR</param></interceptor-ref>
+    </action>
+    <action name="customer-360" class="com.example.bank.action.RiskAction" method="customer360">
+      <interceptor-ref name="apiReadStack"><param name="apiGuardRead.roles">TELLER,SUPERVISOR</param><param name="apiGuardRead.audit">true</param></interceptor-ref>
+    </action>
+    <action name="customer-note" class="com.example.bank.action.RiskAction" method="addNote">
+      <interceptor-ref name="apiWriteStack"><param name="apiGuardWrite.roles">TELLER,SUPERVISOR</param></interceptor-ref>
     </action>
   </package>
 </struts>

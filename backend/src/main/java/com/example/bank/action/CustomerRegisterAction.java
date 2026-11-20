@@ -22,6 +22,7 @@ public class CustomerRegisterAction extends KeyedWriteAction {
     private String idDocType;
     private String idDocNumber;
     private LocalDate birth;
+    private String customerType;
 
     public CustomerRegisterAction() { this(CustomerService.getDefault()); }
 
@@ -53,14 +54,17 @@ public class CustomerRegisterAction extends KeyedWriteAction {
     public String execute() {
         try {
             NewCustomer input = new NewCustomer(name, nameKana, birth, InputRules.normalizePostalCode(postalCode),
-                    address, phone, idDocType, idDocNumber);
-            return ok(customers.register(input, getIdempotencyKey()));
+                    address, phone, idDocType, idDocNumber,
+                    "CORPORATE".equals(customerType) ? "CORPORATE" : "INDIVIDUAL");
+            return ok(customers.register(input, getIdempotencyKey(), currentUser().getUserId()));
         } catch (BankException e) {
             return fail(e);
         }
     }
 
     @StrutsParameter public void setName(String name) { this.name = name; }
+    /** INDIVIDUAL / CORPORATE（法人は商号・設立日・代表者の本人確認書類） */
+    @StrutsParameter public void setCustomerType(String customerType) { this.customerType = customerType; }
     @StrutsParameter public void setNameKana(String nameKana) { this.nameKana = nameKana; }
     @StrutsParameter public void setBirthDate(String birthDate) { this.birthDate = birthDate; }
     @StrutsParameter public void setPostalCode(String postalCode) { this.postalCode = postalCode; }

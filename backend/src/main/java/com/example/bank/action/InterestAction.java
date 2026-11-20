@@ -43,6 +43,7 @@ public class InterestAction extends BaseApiAction {
             return INPUT;
         }
         try {
+            requireAccountAccess(accountNo);
             return ok(interest.preview(accountNo, asOfDate));
         } catch (BankException e) {
             return fail(e);
@@ -56,6 +57,9 @@ public class InterestAction extends BaseApiAction {
             return fail(e);
         }
     }
+
+    @Override
+    public String getAuditTarget() { return (accountNo == null ? "ALL" : accountNo) + (asOf == null ? "" : " asOf=" + asOf); }
 
     @StrutsParameter public void setAccountNo(String accountNo) { this.accountNo = accountNo; }
     @StrutsParameter public void setAsOf(String asOf) { this.asOf = asOf; }

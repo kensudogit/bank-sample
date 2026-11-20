@@ -20,8 +20,8 @@ import java.util.List;
 public class TransactionRepository {
 
     private static final String INSERT = "INSERT INTO account_transaction "
-            + "(account_no, tx_type, amount, balance_after, counterparty_account_no, memo, idempotency_key, created_at) "
-            + "VALUES (?, ?, ?, ?, ?, ?, ?, ?)";
+            + "(account_no, tx_type, amount, balance_after, counterparty_account_no, memo, idempotency_key, created_at, "
+            + "prev_hash, row_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
     private static final String COLS =
             "tx_id, account_no, tx_type, amount, balance_after, counterparty_account_no, memo, created_at";
     /** 残高が増える取引種別（集計用。TxType.isCredit と一致させる） */
@@ -59,7 +59,7 @@ public class TransactionRepository {
                        String counterpartyAccountNo, String memo, String idempotencyKey, LocalDateTime now)
             throws SQLException {
         try (PreparedStatement ps = c.prepareStatement(INSERT)) {
-            bind(ps, accountNo, type, amount, balanceAfter, counterpartyAccountNo, memo, idempotencyKey, now);
+            bind(c, ps, accountNo, type, amount, balanceAfter, counterpartyAccountNo, memo, idempotencyKey, now);
             ps.executeUpdate();
         }
     }
@@ -69,9 +69,9 @@ public class TransactionRepository {
                                String toAccountNo, BigDecimal toBalanceAfter, BigDecimal amount,
                                String memo, String idempotencyKey, LocalDateTime now) throws SQLException {
         try (PreparedStatement ps = c.prepareStatement(INSERT)) {
-            bind(ps, fromAccountNo, TxType.TRANSFER_OUT, amount, fromBalanceAfter, toAccountNo, memo, idempotencyKey, now);
+            bind(c, ps, fromAccountNo, TxType.TRANSFER_OUT, amount, fromBalanceAfter, toAccountNo, memo, idempotencyKey, now);
             ps.addBatch();
-            bind(ps, toAccountNo, TxType.TRANSFER_IN, amount, toBalanceAfter, fromAccountNo, memo, idempotencyKey, now);
+            bind(c, ps, toAccountNo, TxType.TRANSFER_IN, amount, toBalanceAfter, fromAccountNo, memo, idempotencyKey, now);
             ps.addBatch();
             ps.executeBatch();
         }
@@ -116,6 +116,20 @@ public class TransactionRepository {
             try (ResultSet rs = ps.executeQuery()) {
                 rs.next();
                 return new Totals(rs.getLong(1), rs.getBigDecimal(2), rs.getBigDecimal(3));
+            }
+        }
+    }
+
+    /** 指定日時以降の出金・振込（出）の合計（日次上限の判定用）。 */
+    public BigDecimal outflowSince(Connection c, String accountNo, LocalDateTime since) throws SQLException {
+        String sql = "SELECT COALESCE(SUM(amount), 0) FROM account_transaction "
+                   + "WHERE account_no = ? AND created_at >= ? AND tx_type IN ('WITHDRAWAL', 'TRANSFER_OUT')";
+        try (PreparedStatement ps = c.prepareStatement(sql)) {
+            ps.setString(1, accountNo);
+            ps.setTimestamp(2, Timestamp.valueOf(since));
+            try (ResultSet rs = ps.executeQuery()) {
+                rs.next();
+                return rs.getBigDecimal(1);
             }
         }
     }
@@ -197,9 +211,21 @@ public class TransactionRepository {
         }
     }
 
-    private static void bind(PreparedStatement ps, String accountNo, TxType type, BigDecimal amount,
+    /**
+     * 明細の値を設定し、口座ごとのハッシュチェーン（直前の明細のハッシュ + この明細の内容）を計算する。
+     * 呼び出し側は口座行をロックしていること（同じ口座の明細が同時に追加されないため、チェーンが一本になる）。
+     */
+    private static void bind(Connection c, PreparedStatement ps, String accountNo, TxType type, BigDecimal amount,
                              BigDecimal balanceAfter, String counterpartyAccountNo, String memo,
-                             String idempotencyKey, LocalDateTime now) throws SQLException {
+                             String idempotencyKey, LocalDateTime time) throws SQLException {
+        // Second precision: the hashed timestamp must read back identically from Oracle and H2
+        LocalDateTime now = time.withNano(0);
+        String prev = com.example.bank.service.LedgerService.lastHash(c, accountNo);
+        String hash = prev == null ? null : com.example.bank.service.LedgerService.hash(
+                com.example.bank.service.LedgerService.canonical(accountNo, type.name(), amount, balanceAfter,
+                        counterpartyAccountNo, memo, idempotencyKey, now.toString(), prev));
+        ps.setString(9, prev);
+        ps.setString(10, hash);
         ps.setString(1, accountNo);
         ps.setString(2, type.name());
         ps.setBigDecimal(3, amount);

@@ -2,22 +2,100 @@
 
 import Link from "next/link";
 import { useState } from "react";
+import { RequireRole } from "@/components/AuthProvider";
 import { ErrorBox, Loading, SuccessBox } from "@/components/Feedback";
-import { bankApi, useDormancyReport } from "@/lib/api";
-import { accountTypeLabel, formatDate, formatYen, todayIso } from "@/lib/format";
+import { bankApi, useDormancyReport, useJobs } from "@/lib/api";
+import { accountTypeLabel, formatDate, formatDateTime, formatYen, todayIso } from "@/lib/format";
 import type { Account, SettlementSummary } from "@/lib/types";
 
 /** 業務処理（バッチ）: 利息決算と休眠預金管理。本番では行員権限・二重承認・夜間ジョブ化が必要。 */
 export default function OperationsPage() {
   return (
-    <>
+    <RequireRole roles={["SUPERVISOR"]}>
       <h1>業務処理</h1>
-      <p className="section-note">
-        本サンプルには行員認証がありません。本番では権限チェック・承認・夜間ジョブ化が必要な処理です。
-      </p>
+      <p className="section-note">役席者のみ実行できます。実行内容は監査ログに記録されます。</p>
+      <NightlyJobs />
       <InterestSettlement />
       <DormancyManagement />
-    </>
+    </RequireRole>
+  );
+}
+
+const jobLabel: Record<string, string> = {
+  DORMANCY: "休眠管理",
+  INTEREST_SETTLEMENT: "利息決算",
+  REQUEST_CLEANUP: "冪等キー整理",
+};
+
+function NightlyJobs() {
+  const { data, error } = useJobs();
+  const [running, setRunning] = useState(false);
+  const [runError, setRunError] = useState<unknown>(null);
+  const [ran, setRan] = useState<string[] | null>(null);
+
+  const runNow = async () => {
+    if (running) return;
+    setRunning(true);
+    setRunError(null);
+    try {
+      setRan(await bankApi.runJobs());
+    } catch (err) {
+      setRunError(err);
+    } finally {
+      setRunning(false);
+    }
+  };
+
+  return (
+    <section className="card">
+      <h2>夜間バッチ</h2>
+      <p className="section-note">
+        毎日 {data?.startTime ?? "01:00"} 以降に自動実行：休眠管理・古い冪等キーの整理（90日超）。3/1・9/1 は利息決算（2月末・8月末まで）。
+        同じジョブは1日1回だけ実行されます。
+        {data && !data.enabled && <strong>（自動実行は無効です: BANK_JOBS_ENABLED）</strong>}
+      </p>
+      <ErrorBox error={error ?? runError} />
+      {ran && (
+        <SuccessBox>
+          {ran.length === 0
+            ? "本日実行すべきジョブはありません（実行済みまたは開始時刻前）。"
+            : `実行しました: ${ran.map((j) => jobLabel[j] ?? j).join("、")}`}
+        </SuccessBox>
+      )}
+      <div className="actions" style={{ marginBottom: 12 }}>
+        <button className="btn btn-secondary btn-small" type="button" onClick={runNow} disabled={running}>
+          {running ? "実行中…" : "未実行のジョブを今すぐ実行"}
+        </button>
+      </div>
+      {data && data.runs.length > 0 && (
+        <div className="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>業務日</th>
+                <th>ジョブ</th>
+                <th>開始</th>
+                <th>終了</th>
+                <th>結果</th>
+                <th>内容</th>
+              </tr>
+            </thead>
+            <tbody>
+              {data.runs.map((r) => (
+                <tr key={`${r.jobName}-${r.runDate}`}>
+                  <td>{r.runDate}</td>
+                  <td>{jobLabel[r.jobName] ?? r.jobName}</td>
+                  <td className="muted">{formatDateTime(r.startedAt)}</td>
+                  <td className="muted">{formatDateTime(r.finishedAt)}</td>
+                  <td>{r.outcome ? <span className={`badge badge-${r.outcome}`}>{r.outcome}</span> : "実行中"}</td>
+                  <td>{r.detail ?? ""}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </section>
   );
 }
 

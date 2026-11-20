@@ -46,7 +46,7 @@ class BankServiceTest {
     @Test
     void listsSeededAccountsWithCustomerNames() {
         List<Account> accounts = service.listAccounts();
-        assertEquals(7, accounts.size());
+        assertEquals(8, accounts.size());   // incl. the corporate checking account
         assertEquals("1000001", accounts.get(0).getAccountNo());
         assertEquals("山田 太郎", accounts.get(0).getCustomerName());
         assertEquals(0, new BigDecimal("1250000").compareTo(accounts.get(0).getBalance()));

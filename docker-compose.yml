@@ -31,6 +31,8 @@ services:
       BANK_DB_USER: ${BANK_DB_USER:-BANK}
       BANK_DB_PASSWORD: ${BANK_DB_PASSWORD:?set BANK_DB_PASSWORD in .env}
       TZ: Asia/Tokyo
+      # Nightly batch (dormancy, interest settlement on Mar 1 / Sep 1, idempotency key cleanup) from 01:00
+      BANK_JOBS_ENABLED: ${BANK_JOBS_ENABLED:-true}
     ports:
       - "127.0.0.1:${LIBERTY_HOST_PORT:-9080}:9080"
     depends_on:

@@ -3,11 +3,11 @@
 import { useState } from "react";
 import { ErrorBox, Loading } from "@/components/Feedback";
 import { useInterestPreview } from "@/lib/api";
-import { formatNumber, formatYen, todayIso } from "@/lib/format";
+import { formatMoney, formatNumber, todayIso } from "@/lib/format";
 import type { InterestResult } from "@/lib/types";
 
 /** 利息・税の見込み（前回決算の翌日〜基準日の前日）。 */
-export function InterestPreview({ accountNo }: { accountNo: string }) {
+export function InterestPreview({ accountNo, currency = "JPY" }: { accountNo: string; currency?: string }) {
   const [asOf, setAsOf] = useState(todayIso);
   const { data, error } = useInterestPreview(accountNo, asOf);
 
@@ -26,12 +26,12 @@ export function InterestPreview({ accountNo }: { accountNo: string }) {
       </form>
       <ErrorBox error={error} />
       {!data && !error && <Loading />}
-      {data && <InterestTable result={data} />}
+      {data && <InterestTable result={data} currency={currency} />}
     </section>
   );
 }
 
-export function InterestTable({ result }: { result: InterestResult }) {
+export function InterestTable({ result, currency = "JPY" }: { result: InterestResult; currency?: string }) {
   if (result.days === 0) {
     return <p className="empty">前回の利息決算以降、基準日の前日までに計算対象の日がありません。</p>;
   }
@@ -45,23 +45,23 @@ export function InterestTable({ result }: { result: InterestResult }) {
       </div>
       <div className="stat">
         <dt>平均残高</dt>
-        <dd>{formatYen(result.averageBalance)}</dd>
+        <dd>{formatMoney(result.averageBalance, currency)}</dd>
       </div>
       <div className="stat">
         <dt>利息（税引前）</dt>
-        <dd>{formatYen(result.grossInterest)}</dd>
+        <dd>{formatMoney(result.grossInterest, currency)}</dd>
       </div>
       <div className="stat">
         <dt>国税 15.315%</dt>
-        <dd className="minus">{formatYen(result.nationalTax)}</dd>
+        <dd className="minus">{formatMoney(result.nationalTax, currency)}</dd>
       </div>
       <div className="stat">
         <dt>地方税 5%</dt>
-        <dd className="minus">{formatYen(result.localTax)}</dd>
+        <dd className="minus">{formatMoney(result.localTax, currency)}</dd>
       </div>
       <div className="stat">
         <dt>受取利息（税引後）</dt>
-        <dd className="plus">{formatYen(result.netInterest)}</dd>
+        <dd className="plus">{formatMoney(result.netInterest, currency)}</dd>
       </div>
     </dl>
   );

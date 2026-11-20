@@ -221,8 +221,8 @@ class AccountLifecycleTest {
     void bulkSettlementSkipsClosedAccounts() {
         lifecycle.close("1000004", null, key());
         SettlementSummary summary = interest.settleAll(TODAY);
-        assertEquals(6, summary.getResults().size());   // 7 accounts - 1 closed
-        assertEquals(6, summary.getSettledCount());
+        assertEquals(7, summary.getResults().size());   // 8 accounts - 1 closed
+        assertEquals(7, summary.getSettledCount());
         assertTrue(summary.getTotalGross().signum() > 0);
         assertEquals(0, summary.getTotalGross().subtract(summary.getTotalTax()).compareTo(summary.getTotalNet()));
         assertEquals(0, interest.settleAll(TODAY).getSettledCount());   // idempotent per period

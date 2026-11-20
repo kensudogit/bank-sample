@@ -46,6 +46,9 @@ public class AccountLifecycleAction extends KeyedWriteAction {
         }
     }
 
+    @Override
+    public String getAuditTarget() { return payoutAccountNo == null ? accountNo : accountNo + "->" + payoutAccountNo; }
+
     @StrutsParameter public void setAccountNo(String accountNo) { this.accountNo = accountNo; }
     @StrutsParameter public void setPayoutAccountNo(String payoutAccountNo) { this.payoutAccountNo = payoutAccountNo; }
 }

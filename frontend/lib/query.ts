@@ -11,6 +11,8 @@ import { useCallback, useEffect, useReducer } from "react";
 
 /** Data younger than this is shown without re-fetching. */
 const FRESH_MS = 5_000;
+/** On returning to the tab, data older than this is re-fetched. */
+const FOCUS_REFRESH_MS = 30_000;
 
 type Fetcher<T> = () => Promise<T>;
 
@@ -100,6 +102,17 @@ export function invalidate(...keys: string[]): void {
   });
 }
 
+/** Drops every cached response (logout / user switch: never show one user's data to the next). */
+export function clearCache(): void {
+  cache.forEach((e) => {
+    e.data = undefined;
+    e.error = undefined;
+    e.fetchedAt = 0;
+    e.promise = undefined;
+  });
+  cache.forEach((e) => notify(e));
+}
+
 export interface QueryState<T> {
   data: T | undefined;
   error: unknown;
@@ -136,7 +149,8 @@ if (typeof document !== "undefined") {
   document.addEventListener("visibilitychange", () => {
     if (document.visibilityState !== "visible") return;
     cache.forEach((e, key) => {
-      if (e.listeners.size > 0 && !isFresh(e)) revalidate(key)?.catch(() => undefined);
+      // Tab switches can be frequent: only refresh data that is clearly old
+      if (e.listeners.size > 0 && Date.now() - e.fetchedAt > FOCUS_REFRESH_MS) revalidate(key)?.catch(() => undefined);
     });
   });
 }

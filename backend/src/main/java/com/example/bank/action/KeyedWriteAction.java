@@ -19,4 +19,9 @@ public abstract class KeyedWriteAction extends BaseApiAction {
 
     public String getIdempotencyKey() { return idempotencyKey; }
     @StrutsParameter public void setIdempotencyKey(String idempotencyKey) { this.idempotencyKey = idempotencyKey; }
+
+    @Override
+    public String getRequestKey() {
+        return idempotencyKey == null || idempotencyKey.trim().isEmpty() ? null : idempotencyKey.trim();
+    }
 }

@@ -43,5 +43,8 @@ public class DormancyAction extends BaseApiAction {
         }
     }
 
+    @Override
+    public String getAuditTarget() { return asOf == null ? "today" : asOf; }
+
     @StrutsParameter public void setAsOf(String asOf) { this.asOf = asOf; }
 }

@@ -56,6 +56,7 @@ public class TransactionsAction extends BaseApiAction {
     @Override
     public String execute() {
         try {
+            requireAccountAccess(accountNo);
             return ok(service.searchTransactions(accountNo, fromDate, toDate, typeList,
                     Integer.parseInt(page), Integer.parseInt(size)));
         } catch (BankException e) {

@@ -25,6 +25,7 @@ public class AccountDetailAction extends BaseApiAction {
     @Override
     public String execute() {
         try {
+            requireAccountAccess(accountNo);
             AccountDetail detail = service.getAccountDetail(accountNo);
             Map<String, Object> data = new LinkedHashMap<>();
             data.put("account", detail.getAccount());

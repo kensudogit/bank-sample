@@ -87,7 +87,22 @@ public class AccountLifecycleService {
                 payout = accountFirst ? second : first;
             }
             if (!account.isActive()) throw new BankException(ErrorCode.ACCOUNT_NOT_ACTIVE, accountNo);
+            // 定期預金は中途解約の手続き、外貨預金は円への両替で残高を 0 にしてから
+            if ("TIME".equals(account.getAccountType())) {
+                throw new BankException(ErrorCode.ACCOUNT_TYPE_NOT_ALLOWED, accountNo);
+            }
+            if (!account.isJpy() && account.getBalance().signum() != 0) {
+                throw new BankException(ErrorCode.ACCOUNT_NOT_EMPTY, accountNo);
+            }
+            if (account.getBalance().signum() < 0) throw new BankException(ErrorCode.ACCOUNT_NOT_EMPTY, accountNo);
+            if (!com.example.bank.repository.ProductRepository.query(c, "SELECT loan_id FROM loan "
+                    + "WHERE repayment_account_no = ? AND status IN ('CONTRACTED', 'ACTIVE', 'DELINQUENT')", accountNo).isEmpty()) {
+                throw new BankException(ErrorCode.LOAN_OUTSTANDING, accountNo);
+            }
             if (payout != null) {
+                if (!payout.isJpy() || "TIME".equals(payout.getAccountType())) {
+                    throw new BankException(ErrorCode.ACCOUNT_TYPE_NOT_ALLOWED, payoutAccountNo);
+                }
                 if (!payout.isActive()) throw new BankException(ErrorCode.ACCOUNT_NOT_ACTIVE, payoutAccountNo);
                 if (!payout.getCustomerId().equals(account.getCustomerId())) {
                     throw new BankException(ErrorCode.NOT_OWN_ACCOUNT, payoutAccountNo);
