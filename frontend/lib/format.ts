@@ -160,3 +160,14 @@ export function normalizeDigits(input: string): string {
     .replace(/[－ー−‐]/g, "-")
     .replace(/\s/g, "");
 }
+
+/** 情報系：顧客セグメント（RFM の R と M から判定） */
+export const segmentLabel: Record<string, string> = {
+  LOYAL: "優良",
+  GROWTH: "成長",
+  STANDARD: "一般",
+  AT_RISK: "休眠リスク",
+  LAPSED: "離反",
+};
+
+export const customerTypeLabel: Record<string, string> = { INDIVIDUAL: "個人", CORPORATE: "法人" };

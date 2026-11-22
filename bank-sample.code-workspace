@@ -1,0 +1,48 @@
+{
+	// bank-sample 専用のワークスペース。Java（Gradle）は backend だけを読み込むので、
+	// Java 言語サーバーがすぐ起動し、テストメソッドの行番号の横に ▷ が表示される。
+	"folders": [
+		{ "name": "backend (Java / Gradle)", "path": "backend" },
+		{ "name": "frontend (Next.js)", "path": "frontend" },
+		{ "name": "db", "path": "db" }
+	],
+	"settings": {
+		// Java：backend の Gradle（ラッパー）で読み込む
+		"java.server.launchMode": "Standard",
+		"java.import.gradle.enabled": true,
+		"java.import.gradle.wrapper.enabled": true,
+		"java.import.maven.enabled": false,
+		"java.import.exclusions": [
+			"**/node_modules/**",
+			"**/.metadata/**",
+			"**/archetype-resources/**",
+			"**/META-INF/maven/**",
+			"**/build/**"
+		],
+		"java.configuration.updateBuildConfiguration": "automatic",
+		// Gradle 拡張：このワークスペースの外（他のプロジェクト）を探さない
+		"gradle.nestedProjects": false,
+
+		// 行番号の横の ▷：クリックでそのテストメソッドをデバッグ実行（右クリックで通常の実行も選べる）
+		"editor.glyphMargin": true,
+		"testing.gutterEnabled": true,
+		"testing.defaultGutterClickAction": "debug",
+		"testing.openTesting": "openOnTestFailure",
+		"java.test.editor.enableShortcuts": true,
+		"java.debug.settings.enableRunDebugCodeLens": true,
+
+		// ステップ実行：JDK・ライブラリの中に入らない。変数の値をエディタ内に表示
+		"debug.inlineValues": "on",
+		"java.debug.settings.stepping.skipClasses": ["$JDK", "$Libraries", "java.lang.ClassLoader"],
+		"java.debug.settings.stepping.skipSynthetics": true,
+		"java.debug.settings.stepping.skipStaticInitializers": true,
+		"java.debug.settings.hotCodeReplace": "auto",
+
+		"files.exclude": {
+			"**/build": true,
+			"**/.gradle": true,
+			"**/node_modules": true
+		},
+		"testing.automaticallyOpenTestResults": "openOnTestFailure"
+	}
+}

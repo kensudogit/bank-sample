@@ -211,15 +211,21 @@ export const queryKeys = {
 /** Cached readers: show the last data instantly, refresh in the background. */
 /** Account list page. Customers automatically get only their own accounts. */
 export const useAccounts = (q: { q?: string; page?: number; size?: number } = {}) =>
-  useQuery(queryKeys.accounts(q), () => bankApi.searchAccounts(q));
-export const useAuditLog = (q: AuditQuery) => useQuery(queryKeys.audit(q), () => bankApi.auditLog(q));
+  useQuery(queryKeys.accounts(q), () => bankApi.searchAccounts(q), { keepPreviousWithin: "accounts" });
+export const prefetchAccounts = (q: { q?: string; page?: number; size?: number }) =>
+  prefetch(queryKeys.accounts(q), () => bankApi.searchAccounts(q));
+export const useAuditLog = (q: AuditQuery) =>
+  useQuery(queryKeys.audit(q), () => bankApi.auditLog(q), { keepPreviousWithin: "audit" });
+export const prefetchAuditLog = (q: AuditQuery) => prefetch(queryKeys.audit(q), () => bankApi.auditLog(q));
 export const useJobs = () => useQuery(queryKeys.jobs, bankApi.jobs);
 export const useAccountDetail = (accountNo: string) =>
   useQuery(queryKeys.account(accountNo), () => bankApi.getAccount(accountNo));
 export const prefetchAccountDetail = (accountNo: string) =>
   prefetch(queryKeys.account(accountNo), () => bankApi.getAccount(accountNo));
 export const useTransactions = (q: TransactionQuery) =>
-  useQuery(queryKeys.transactions(q), () => bankApi.searchTransactions(q));
+  useQuery(queryKeys.transactions(q), () => bankApi.searchTransactions(q), { keepPreviousWithin: `tx:${q.accountNo}` });
+export const prefetchTransactions = (q: TransactionQuery) =>
+  prefetch(queryKeys.transactions(q), () => bankApi.searchTransactions(q));
 export const useInterestPreview = (accountNo: string, asOf: string) =>
   useQuery(queryKeys.interest(accountNo, asOf), () => bankApi.previewInterest(accountNo, asOf));
 export const useCustomers = () => useQuery(queryKeys.customers, bankApi.listCustomers);

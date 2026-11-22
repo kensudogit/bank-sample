@@ -38,6 +38,10 @@ function RiskDashboard() {
             sub={Number(credit.totalEad) > 0 ? `EAD 比 ${formatPercent(Number(credit.expectedLoss) / Number(credit.totalEad), 2)}` : undefined} />
           <Kpi label="不良債権（要管理先以下）" value={formatYen(credit.nplAmount)} sub={`不良債権比率 ${formatPercent(Number(credit.nplRatio), 2)}`}
             tone={Number(credit.nplRatio) > 0.03 ? "minus" : undefined} />
+          <Kpi label="貸倒引当金" value={formatYen(credit.totalProvision ?? 0)}
+            sub={`貸出残高比 ${formatPercent(Number(credit.provisionToLoans ?? 0), 2)}`} />
+          <Kpi label="不良債権の引当率（引当 ÷ 不良債権）" value={Number(credit.nplAmount) > 0 ? formatPercent(Number(credit.provisionToNpl)) : "—"}
+            sub="保全額（担保）でカバーされる部分は引当不要" />
         </dl>
         <div className="form-grid" style={{ gap: 24 }}>
           <Bars title="格付別 EAD" rows={credit.byGrade} label={(r) => `格付 ${r.key}`} value="ead" />

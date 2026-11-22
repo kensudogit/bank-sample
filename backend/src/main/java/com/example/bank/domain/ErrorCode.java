@@ -31,6 +31,7 @@ public enum ErrorCode {
     ACCOUNT_TYPE_LIMIT("unprocessable"),          // 422
     ACCOUNT_NOT_DORMANT("unprocessable"),         // 422
     INVALID_BASE_DATE("unprocessable"),           // 422
+    INVALID_PERIOD("unprocessable"),              // 422 期間の指定（開始日・終了日・日数の上限）
     ACCOUNT_TYPE_NOT_ALLOWED("unprocessable"),    // 422 この口座種別ではできない操作
     CURRENCY_MISMATCH("unprocessable"),           // 422
     NOTICE_REQUIRED("unprocessable"),             // 422 通知預金: 事前の通知が必要

@@ -6,6 +6,7 @@ import { useState } from "react";
 import { useAuth } from "@/components/AuthProvider";
 import { ErrorBox, Loading, SuccessBox } from "@/components/Feedback";
 import { IconArrowLeft } from "@/components/Icons";
+import { LoanManagement } from "@/components/LoanManagement";
 import { ApiError, newIdempotencyKey } from "@/lib/api";
 import { loanApi, useLoan, type Row } from "@/lib/banking";
 import {
@@ -36,8 +37,10 @@ export default function LoanPage() {
     try {
       await fn();
       setMessage(done);
+      return true;
     } catch (e) {
       setErr(e);
+      return false;
     }
   };
 
@@ -104,7 +107,7 @@ export default function LoanPage() {
         </section>
       )}
 
-      {loan.collaterals.length > 0 && (
+      {!staff && loan.collaterals.length > 0 && (
         <section className="card table-wrap">
           <h2>担保・保証</h2>
           <table>
@@ -136,6 +139,8 @@ export default function LoanPage() {
         )}
       </section>
 
+      {staff && <LoanManagement loanId={id} loan={loan} supervisor={supervisor} run={run} />}
+
       {staff && (live || loan.collectionActions.length > 0) && <CollectionSection loan={loan} run={run} />}
 
       {supervisor && live && (
@@ -156,7 +161,7 @@ export default function LoanPage() {
   );
 }
 
-function PaymentForms({ loan, run }: { loan: Row; run: (fn: () => Promise<any>, done: string) => Promise<void> }) {
+function PaymentForms({ loan, run }: { loan: Row; run: (fn: () => Promise<any>, done: string) => Promise<unknown> }) {
   const card = loan.product === "CARD";
   const [mode, setMode] = useState<"repay" | "prepay" | "draw">(card ? "draw" : "repay");
   const [amount, setAmount] = useState(loan.dueNow > 0 ? String(loan.dueNow) : "");
@@ -198,7 +203,7 @@ function PaymentForms({ loan, run }: { loan: Row; run: (fn: () => Promise<any>, 
   );
 }
 
-function CollectionSection({ loan, run }: { loan: Row; run: (fn: () => Promise<any>, done: string) => Promise<void> }) {
+function CollectionSection({ loan, run }: { loan: Row; run: (fn: () => Promise<any>, done: string) => Promise<unknown> }) {
   const [type, setType] = useState("CALL");
   const [note, setNote] = useState("");
   const [promised, setPromised] = useState("");

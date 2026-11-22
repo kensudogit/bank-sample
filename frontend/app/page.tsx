@@ -1,11 +1,11 @@
 "use client";
 
 import Link from "next/link";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useAuth } from "@/components/AuthProvider";
 import { ErrorBox, Loading } from "@/components/Feedback";
 import { IconPlus, IconSearch, IconTransfer } from "@/components/Icons";
-import { prefetchAccountDetail, useAccounts } from "@/lib/api";
+import { prefetchAccountDetail, prefetchAccounts, useAccounts } from "@/lib/api";
 import { accountTypeLabel, formatDate, formatDateTime, formatMoney, formatNumber, formatYen, statusLabel } from "@/lib/format";
 import type { Account } from "@/lib/types";
 
@@ -21,7 +21,12 @@ export default function DashboardPage() {
   const [draft, setDraft] = useState("");
   const [q, setQ] = useState("");
   const [page, setPage] = useState(1);
-  const { data, error, loading } = useAccounts({ q, page, size: PAGE_SIZE });
+  const { data, error, loading, placeholder } = useAccounts({ q, page, size: PAGE_SIZE });
+  // Fetch the next page in the background so "次へ" shows it immediately
+  const hasNext = !placeholder && !!data?.hasNext;
+  useEffect(() => {
+    if (hasNext) prefetchAccounts({ q, page: page + 1, size: PAGE_SIZE });
+  }, [hasNext, q, page]);
   const isCustomer = user?.customer ?? false;
 
   const activeCount = data?.items.filter((a) => a.status === "ACTIVE").length ?? 0;
@@ -88,7 +93,9 @@ export default function DashboardPage() {
                   )}
                 </div>
               </form>
-              <AccountTable accounts={data.items} />
+              <div className={placeholder ? "is-stale" : undefined} aria-busy={placeholder}>
+                <AccountTable accounts={data.items} />
+              </div>
               {(data.page > 1 || data.hasNext) && (
                 <div className="pager">
                   <span className="muted">

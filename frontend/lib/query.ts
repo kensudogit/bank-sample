@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useReducer } from "react";
+import { useCallback, useEffect, useReducer, useRef } from "react";
 
 /**
  * Minimal stale-while-revalidate cache for GET requests (in memory only, never persisted).
@@ -26,6 +26,8 @@ interface Entry<T> {
 }
 
 const cache = new Map<string, Entry<unknown>>();
+/** Incremented by clearCache, so placeholders kept by mounted components are dropped too. */
+let generation = 0;
 
 function entry<T>(key: string): Entry<T> {
   let e = cache.get(key) as Entry<T> | undefined;
@@ -104,6 +106,7 @@ export function invalidate(...keys: string[]): void {
 
 /** Drops every cached response (logout / user switch: never show one user's data to the next). */
 export function clearCache(): void {
+  generation++;
   cache.forEach((e) => {
     e.data = undefined;
     e.error = undefined;
@@ -118,12 +121,31 @@ export interface QueryState<T> {
   error: unknown;
   /** true while a (background) request is running */
   loading: boolean;
+  /** true when `data` is the previous key's result, shown while the new key loads (keepPrevious) */
+  placeholder: boolean;
   reload: () => void;
 }
 
-export function useQuery<T>(key: string, fetcher: Fetcher<T>): QueryState<T> {
+export interface QueryOptions {
+  /**
+   * Paged / filtered lists: when the key changes (next page, new filter), keep showing the previous result
+   * until the new one arrives instead of flashing the loading skeleton. The value is a scope (e.g. the
+   * account number): data is only carried over within the same scope, never to another account's list.
+   */
+  keepPreviousWithin?: string;
+}
+
+export function useQuery<T>(key: string, fetcher: Fetcher<T>, options: QueryOptions = {}): QueryState<T> {
   const [, rerender] = useReducer((n: number) => n + 1, 0);
   const e = entry<T>(key);
+  const scope = options.keepPreviousWithin;
+  const previous = useRef<{ data: T; generation: number; scope?: string } | undefined>(undefined);
+  if (e.data !== undefined) previous.current = { data: e.data, generation, scope };
+  // After clearCache (logout / user switch) the previous user's list must not be shown as a placeholder
+  if (previous.current && previous.current.generation !== generation) previous.current = undefined;
+  // Never keep showing old data next to an error for the new key, or for another scope
+  const placeholder = scope !== undefined && e.data === undefined && e.error === undefined
+    && previous.current !== undefined && previous.current.scope === scope;
   // The fetcher is a pure function of the key; keep the first one registered for this key.
   e.fetcher ??= fetcher;
 
@@ -141,7 +163,13 @@ export function useQuery<T>(key: string, fetcher: Fetcher<T>): QueryState<T> {
     revalidate<T>(key)?.catch(() => undefined);
   }, [key]);
 
-  return { data: e.data, error: e.error, loading: e.promise !== undefined, reload };
+  return {
+    data: placeholder ? previous.current?.data : e.data,
+    error: e.error,
+    loading: e.promise !== undefined || placeholder,
+    placeholder,
+    reload,
+  };
 }
 
 // Refresh what is on screen when the user comes back to the tab (balances may have changed elsewhere).

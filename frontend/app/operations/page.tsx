@@ -5,6 +5,7 @@ import { useState } from "react";
 import { RequireRole } from "@/components/AuthProvider";
 import { ErrorBox, Loading, SuccessBox } from "@/components/Feedback";
 import { bankApi, useDormancyReport, useJobs } from "@/lib/api";
+import { loanApi, useProvisionSummary, type Row } from "@/lib/banking";
 import { accountTypeLabel, formatDate, formatDateTime, formatYen, todayIso } from "@/lib/format";
 import type { Account, SettlementSummary } from "@/lib/types";
 
@@ -15,6 +16,7 @@ export default function OperationsPage() {
       <h1>業務処理</h1>
       <p className="section-note">役席者のみ実行できます。実行内容は監査ログに記録されます。</p>
       <NightlyJobs />
+      <LoanProvisions />
       <InterestSettlement />
       <DormancyManagement />
     </RequireRole>
@@ -25,6 +27,7 @@ const jobLabel: Record<string, string> = {
   DORMANCY: "休眠管理",
   INTEREST_SETTLEMENT: "利息決算",
   REQUEST_CLEANUP: "冪等キー整理",
+  DW_LOAD: "情報系取込",
 };
 
 function NightlyJobs() {
@@ -289,5 +292,61 @@ function DormancyTable({ title, accounts, showDormantAt }: { title: string; acco
         </table>
       )}
     </div>
+  );
+}
+
+const classLabel: Record<string, string> = {
+  NORMAL: "正常先", WATCH: "要注意先", SPECIAL: "要管理先", DOUBTFUL: "破綻懸念先", DEFACTO: "実質破綻先", BANKRUPT: "破綻先",
+};
+
+/** 貸倒引当金：毎晩の約定返済処理（融資）の後に自動で見直す。手動での見直しと区分別の残高。 */
+function LoanProvisions() {
+  const { data, error } = useProvisionSummary();
+  const [running, setRunning] = useState(false);
+  const [runError, setRunError] = useState<unknown>(null);
+  const [result, setResult] = useState<Row | null>(null);
+  const runNow = async () => {
+    if (running) return;
+    setRunning(true);
+    setRunError(null);
+    try {
+      setResult(await loanApi.provisionRun());
+    } catch (err) {
+      setRunError(err);
+    } finally {
+      setRunning(false);
+    }
+  };
+  return (
+    <section className="card">
+      <h2>貸倒引当金</h2>
+      <p className="section-note">
+        債務者区分ごとに必要額を計算し、差額を積み増し・取り崩します（正常先 0.5%・要注意先 3%・要管理先 15%・破綻懸念先は非保全額の 70%・
+        実質破綻先以下は 100%）。夜間バッチ（約定返済）の後に自動で実行されます。同じ日に何度実行しても結果は同じです。
+      </p>
+      <ErrorBox error={error ?? runError} />
+      {result && (
+        <SuccessBox>
+          {result.loans} 件を見直し、{result.changed} 件を更新しました（増減 {formatYen(Number(result.totalChange))}・引当総額 {formatYen(Number(result.totalProvision))}）。
+        </SuccessBox>
+      )}
+      {data && (
+        <div className="table-wrap" style={{ marginBottom: 12 }}>
+          <table>
+            <thead><tr><th>債務者区分</th><th className="num">件数</th><th className="num">引当額</th></tr></thead>
+            <tbody>
+              {(data.byClass as Row[]).map((r) => (
+                <tr key={r.borrowerClass}><td>{classLabel[r.borrowerClass] ?? r.borrowerClass}</td>
+                  <td className="num">{r.loans}</td><td className="num">{formatYen(Number(r.provision))}</td></tr>
+              ))}
+              <tr><th>合計</th><th /><th className="num">{formatYen(Number(data.totalProvision))}</th></tr>
+            </tbody>
+          </table>
+        </div>
+      )}
+      <button className="btn btn-secondary btn-small" type="button" onClick={runNow} disabled={running}>
+        {running ? "見直し中…" : "引当を今すぐ見直す"}
+      </button>
+    </section>
   );
 }

@@ -111,7 +111,9 @@ public class BankService {
 
     /** 口座の名義人（顧客番号）。アクセス権の確認用。 */
     public String accountOwner(String accountNo) {
-        return getAccount(accountNo).getCustomerId();
+        // 口座全体（顧客表の結合を含む）ではなく名義人の列だけを読む。存在しない口座は従来どおり ACCOUNT_NOT_FOUND
+        return Transactions.readOnly(dataSource.get(), c -> accounts.findOwner(c, accountNo))
+                .orElseThrow(() -> new BankException(ErrorCode.ACCOUNT_NOT_FOUND, accountNo));
     }
 
     /**

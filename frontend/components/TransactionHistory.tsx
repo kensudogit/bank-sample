@@ -1,8 +1,8 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { ErrorBox, Loading } from "@/components/Feedback";
-import { bankApi, useTransactions, type TransactionQuery } from "@/lib/api";
+import { bankApi, prefetchTransactions, useTransactions, type TransactionQuery } from "@/lib/api";
 import { creditTypes, formatDateTime, formatMoney, formatNumber, txTypeLabel } from "@/lib/format";
 import type { AccountTransaction, TxType } from "@/lib/types";
 
@@ -24,7 +24,13 @@ export function TransactionHistory({ accountNo, currency = "JPY" }: { accountNo:
   const [exportError, setExportError] = useState<unknown>(null);
 
   const query: TransactionQuery = { accountNo, ...filter, page, size: PAGE_SIZE };
-  const { data, error, loading } = useTransactions(query);
+  const { data, error, loading, placeholder } = useTransactions(query);
+
+  // Fetch the next page in the background so "次へ" shows it immediately
+  const hasNext = !placeholder && !!data?.hasNext;
+  useEffect(() => {
+    if (hasNext) prefetchTransactions({ accountNo, ...filter, page: page + 1, size: PAGE_SIZE });
+  }, [hasNext, accountNo, filter, page]);
 
   const apply = (e: React.FormEvent) => {
     e.preventDefault();
@@ -99,7 +105,7 @@ export function TransactionHistory({ accountNo, currency = "JPY" }: { accountNo:
       <ErrorBox error={error ?? exportError} />
       {!data && !error && <Loading />}
       {data && (
-        <>
+        <div className={placeholder ? "is-stale" : undefined} aria-busy={placeholder}>
           <dl className="stats">
             <div className="stat">
               <dt>{filter.from ? `期首残高（${filter.from} 開始時）` : "期首残高"}</dt>
@@ -167,7 +173,7 @@ export function TransactionHistory({ accountNo, currency = "JPY" }: { accountNo:
                 onClick={() => setPage(page + 1)}>次へ</button>
             </div>
           </div>
-        </>
+        </div>
       )}
     </section>
   );

@@ -57,8 +57,12 @@
                        connectionProperties="oracle.net.CONNECT_TIMEOUT=5000"/>
     <connectionManager minPoolSize="1" maxPoolSize="10" connectionTimeout="10s" purgePolicy="EntirePool"/>
   </dataSource>
+  <!--
+    writeContents ONLY_UPDATED_ATTRIBUTES: the login user is only replaced via setAttribute (login / password change),
+    so most requests write no attribute data at all instead of re-serializing the session on every API call.
+  -->
   <httpSessionDatabase id="sessionDB" dataSourceRef="sessionDS" writeFrequency="END_OF_SERVLET_SERVICE"
-                       writeContents="ALL_SESSION_ATTRIBUTES" tableName="BANK_HTTP_SESSIONS"/>
+                       writeContents="ONLY_UPDATED_ATTRIBUTES" tableName="BANK_HTTP_SESSIONS"/>
 
   <httpSession storageRef="sessionDB" cookieName="BANKSESSION" cookieHttpOnly="true" cookieSameSite="Lax" cookiePath="/"
                cookieSecure="false"/>

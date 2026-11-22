@@ -45,6 +45,14 @@ export const loanApi = {
   writeOff: (loanId: string, note: string) => post("/loan-writeoff", { loanId, note }),
   setClass: (loanId: string, borrowerClass: string) => post("/loan-class", { loanId, borrowerClass }),
   processDue: () => post("/loan-process-due", {}),
+  // 融資管理：返済シミュレーション・引当・担保の再評価・条件変更
+  simulate: (q: { amount: string; rate: string; termMonths: string; repaymentMethod: string; paymentDay?: string }) =>
+    get("/loan-simulate", q),
+  management: (loanId: string) => get("/loan-management", { loanId }),
+  provisionRun: () => post("/loan-provision-run", {}),
+  provisionSummary: () => get("/loan-provision-summary"),
+  revalue: (b: { collateralId: string; appraisalValue: string; note: string }) => post("/collateral-revalue", b),
+  reschedule: (b: { loanId: string; termMonths: string; rate?: string; note: string }) => post("/loan-reschedule", b),
 };
 
 // ---------------- payments ----------------
@@ -87,6 +95,17 @@ export const riskApi = {
     post<Row[]>("/customer-note", { customerId, noteType, content }),
 };
 
+// ---------------- information systems (DWH / MIS / analytics / reports) ----------------
+export type ReportType = "DEPOSIT_BALANCE" | "LOAN_BALANCE" | "TX_SUMMARY" | "KPI_TREND" | "CUSTOMER_ASSETS";
+export const infoApi = {
+  status: () => get("/dw-status"),
+  load: (from: string, to: string) => post<Row[]>("/dw-load", { from, to }),
+  dashboard: (from?: string, to?: string) => get("/mis-dashboard", { from, to }),
+  customers: (date?: string) => get("/customer-analytics", { date }),
+  report: (type: ReportType, q: { date?: string; from?: string; to?: string }) =>
+    get("/info-report", { type, date: q.date, from: q.from, to: q.to }),
+};
+
 // ---------------- cached readers ----------------
 export const useTimeRates = () => useQuery("time-rates", depositApi.timeRates);
 export const useFxRates = () => useQuery("fx-rates", depositApi.fxRates);
@@ -109,3 +128,12 @@ export const useForeignRemittances = (status?: string) =>
 export const useRiskDashboard = () => useQuery("risk", riskApi.dashboard);
 export const useAmlAlerts = (status?: string) => useQuery(`aml:${status ?? ""}`, () => riskApi.alerts(status));
 export const useCustomer360 = (customerId: string) => useQuery(`c360:${customerId}`, () => riskApi.customer360(customerId));
+export const useMisDashboard = (from?: string, to?: string) =>
+  useQuery(`mis:${from ?? ""}:${to ?? ""}`, () => infoApi.dashboard(from, to), { keepPreviousWithin: "mis" });
+export const useCustomerAnalytics = (date?: string) =>
+  useQuery(`analytics:${date ?? ""}`, () => infoApi.customers(date), { keepPreviousWithin: "analytics" });
+export const useInfoReport = (type: ReportType, q: { date?: string; from?: string; to?: string }) =>
+  useQuery(`report:${type}:${q.date ?? ""}:${q.from ?? ""}:${q.to ?? ""}`, () => infoApi.report(type, q),
+    { keepPreviousWithin: "report" });
+export const useLoanManagement = (loanId: string) => useQuery(`loan-mgmt:${loanId}`, () => loanApi.management(loanId));
+export const useProvisionSummary = () => useQuery("provision-summary", loanApi.provisionSummary);

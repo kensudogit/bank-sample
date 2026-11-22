@@ -172,6 +172,24 @@ public class AccountRepository {
     }
 
     /**
+     * 口座の名義人の顧客番号だけを取得する（アクセス権の確認用）。
+     * ほぼすべての口座系 API の前に呼ばれるため、顧客表を結合せず主キーで 1 列だけ読む。
+     *
+     * @param c         DB 接続
+     * @param accountNo 口座番号
+     * @return 顧客番号（口座が存在しなければ空）
+     * @throws SQLException DB アクセスに失敗した場合
+     */
+    public Optional<String> findOwner(Connection c, String accountNo) throws SQLException {
+        try (PreparedStatement ps = c.prepareStatement("SELECT customer_id FROM account WHERE account_no = ?")) {
+            ps.setString(1, accountNo);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next() ? Optional.of(rs.getString(1)) : Optional.<String>empty();
+            }
+        }
+    }
+
+    /**
      * 行ロック付きで取得（SELECT ... FOR UPDATE）。顧客表は結合しない（顧客行までロックしないため）。
      * デッドロック回避のため、複数口座をロックする場合は口座番号順にロックすること。
      */

@@ -5,7 +5,8 @@ import { usePathname, useRouter } from "next/navigation";
 import { createContext, useCallback, useContext, useEffect, useState } from "react";
 import { Loading } from "@/components/Feedback";
 import { Logo } from "@/components/Logo";
-import { IconAlert, IconChart, IconGlobe, IconLoan, IconPiggy, IconCog, IconHome, IconKey, IconLogout, IconMenu, IconMoon, IconShield, IconSun, IconTransfer, IconUsers } from "@/components/Icons";
+import { UsageGuidePanel, useGuideOpen } from "@/components/UsageGuidePanel";
+import { IconAlert, IconBook, IconChart, IconDashboard, IconReport, IconTarget, IconGlobe, IconLoan, IconPiggy, IconCog, IconHome, IconKey, IconLogout, IconMenu, IconMoon, IconShield, IconSun, IconTransfer, IconUsers } from "@/components/Icons";
 import { authApi, UNAUTHENTICATED_EVENT } from "@/lib/api";
 import { clearCache } from "@/lib/query";
 import type { LoginUser, Role } from "@/lib/types";
@@ -71,6 +72,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const ready = checked && (isPublic || (user && (!user.mustChangePassword || pathname === "/password")));
   const [menuOpen, setMenuOpen] = useState(false);
   useEffect(() => setMenuOpen(false), [pathname]);
+  const [guideOpen, setGuideOpen] = useGuideOpen();
 
   // Login and other public pages use their own full-screen layout
   if (isPublic) {
@@ -85,6 +87,10 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           {user && !user.mustChangePassword && <Nav user={user} pathname={pathname} />}
           {user && (
             <div className="sidebar-foot">
+              <button type="button" className="ghost-btn guide-btn" aria-expanded={guideOpen}
+                onClick={() => setGuideOpen(!guideOpen)}>
+                <IconBook size={16} /> 利用手順
+              </button>
               <div className="user-card">
                 <span className="avatar" aria-hidden="true">{user.displayName.slice(0, 1)}</span>
                 <div className="who">
@@ -115,12 +121,17 @@ export function AppShell({ children }: { children: React.ReactNode }) {
               <IconMenu />
             </button>
             <Brand compact />
+            <button type="button" className="icon-btn" aria-label="利用手順" title="利用手順" aria-expanded={guideOpen}
+              onClick={() => setGuideOpen(!guideOpen)}>
+              <IconBook size={18} />
+            </button>
             <ThemeToggle />
           </div>
           <main className="container">{ready ? children : <Loading />}</main>
           <footer className="footer">デモ用サンプル（架空データ）。本番利用不可。</footer>
         </div>
       </div>
+      {user && <UsageGuidePanel open={guideOpen} onClose={() => setGuideOpen(false)} />}
     </AuthContext.Provider>
   );
 }
@@ -159,6 +170,14 @@ function Nav({ user, pathname }: { user: LoginUser; pathname: string }) {
         <>
           <div className="nav-section">BRANCH</div>
           {item("/customers", "顧客・口座開設", <IconUsers />)}
+        </>
+      )}
+      {user.staff && (
+        <>
+          <div className="nav-section">INFORMATION</div>
+          {user.role === "SUPERVISOR" && item("/mis", "経営ダッシュボード", <IconDashboard />)}
+          {item("/analytics", "顧客分析", <IconTarget />)}
+          {user.role === "SUPERVISOR" && item("/reports", "帳票", <IconReport />)}
         </>
       )}
       {user.role === "SUPERVISOR" && (

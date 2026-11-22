@@ -375,7 +375,7 @@ public class LoanService {
     }
 
     /** k 回目の約定返済日（毎月の返済日、休業日は翌営業日）。 */
-    private static LocalDate dueDate(Connection c, LocalDate start, int k, int paymentDay) throws SQLException {
+    static LocalDate dueDate(Connection c, LocalDate start, int k, int paymentDay) throws SQLException {
         LocalDate month = start.plusMonths(k);
         // 月の日数より大きい返済日は月末に寄せる（現状は契約時に 28 日までに制限している）
         LocalDate d = month.withDayOfMonth(Math.min(paymentDay, month.lengthOfMonth()));
@@ -556,6 +556,8 @@ public class LoanService {
     private static void closeLoan(Connection c, long loanId, LocalDateTime now) throws SQLException {
         execute(c, "UPDATE loan SET status = 'PAID_OFF', borrower_class = 'NORMAL', days_past_due = 0, closed_at = ? "
                 + "WHERE loan_id = ?", now, loanId);
+        // 完済したので引当は全額戻し入れる
+        LoanManagementService.provisionLoan(c, loanId, now.toLocalDate(), "完済", "SYSTEM", now);
     }
 
     /** カードローンの日割利息を基準日まで計上する。 */
@@ -626,7 +628,8 @@ public class LoanService {
 
     /** 延滞日数・債務者区分・状態を更新し、延滞日数を返す。 */
     private static int refreshDelinquency(Connection c, long loanId, LocalDate asOf) throws SQLException {
-        Map<String, Object> loan = query(c, "SELECT status, borrower_class, product FROM loan WHERE loan_id = ?", loanId).get(0);
+        Map<String, Object> loan = query(c, "SELECT status, borrower_class, product, restructured FROM loan WHERE loan_id = ?",
+                loanId).get(0);
         if (!"ACTIVE".equals(loan.get("status")) && !"DELINQUENT".equals(loan.get("status"))) return 0;
         // 期日を過ぎても未払いの回を延滞にし、最も古い延滞の期日から延滞日数を数える
         execute(c, "UPDATE loan_schedule SET status = 'OVERDUE' WHERE loan_id = ? AND status IN ('SCHEDULED', 'PARTIAL') "
@@ -636,7 +639,9 @@ public class LoanService {
         Object d = oldest.get(0).get("d");
         int dpd = d == null ? 0 : (int) ChronoUnit.DAYS.between(LocalDate.parse((String) d), asOf);
         // 破綻先は役席が認定した区分なので、延滞日数による自動判定で上書きしない
-        String cls = "BANKRUPT".equals(loan.get("borrower_class")) ? "BANKRUPT" : borrowerClass(dpd);
+        String cls = "BANKRUPT".equals(loan.get("borrowerClass")) ? "BANKRUPT" : borrowerClass(dpd);
+        // 条件を緩和した債権（貸出条件緩和債権）は延滞がなくても要管理先より良い区分にしない
+        if (num(loan.get("restructured")).intValue() == 1) cls = LoanManagementService.worse(cls, "SPECIAL");
         execute(c, "UPDATE loan SET days_past_due = ?, borrower_class = ?, status = ? WHERE loan_id = ?",
                 dpd, cls, dpd > 0 ? "DELINQUENT" : "ACTIVE", loanId);
         return dpd;
@@ -682,11 +687,16 @@ public class LoanService {
                 throw new BankException(ErrorCode.LOAN_RULE_VIOLATION, "破綻懸念先以下の債権のみ");
             }
             BigDecimal outstanding = (BigDecimal) loan.get("outstanding");
+            BigDecimal provision = num(loan.get("provisionAmount"));
             // 償却後は回収予定がなくなるため、未払いの返済予定を取り消す（償却額は融資取引に残る）
             execute(c, "UPDATE loan_schedule SET status = 'CANCELLED' WHERE loan_id = ? AND status <> 'PAID'", loanId);
             execute(c, "UPDATE loan SET outstanding = 0, status = 'WRITTEN_OFF', closed_at = ? WHERE loan_id = ?", now, loanId);
+            // 引当済みの額は貸倒引当金の取崩し、足りない分は貸倒損失（摘要に内訳を残す）
+            BigDecimal loss = outstanding.subtract(provision.min(outstanding));
             loanTx(c, loanId, "WRITE_OFF", outstanding, BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO, null,
-                    clip("償却: " + (note == null ? "" : note), 100), by, now);
+                    clip("償却（引当取崩 " + provision.min(outstanding).toPlainString() + "・損失 " + loss.toPlainString() + "）: "
+                            + (note == null ? "" : note), 100), by, now);
+            LoanManagementService.provisionLoan(c, loanId, now.toLocalDate(), "償却", by, now);
             return loanView(c, loanId);
         });
     }

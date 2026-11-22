@@ -141,6 +141,12 @@ public class RiskService {
         m.put("byProduct", new ArrayList<>(byProduct.values()));
         m.put("byClass", new ArrayList<>(byClass.values()));
         m.put("topBorrowers", top);
+        // 貸倒引当金（融資管理で計上）と、不良債権に対する引当の充足率
+        BigDecimal provision = LoanService.num(query(c, "SELECT COALESCE(SUM(provision_amount), 0) AS v FROM loan "
+                + "WHERE status IN ('ACTIVE', 'DELINQUENT')").get(0).get("v"));
+        m.put("totalProvision", provision);
+        m.put("provisionToNpl", ratio(provision, npl));
+        m.put("provisionToLoans", ratio(provision, totalOutstanding));
         return m;
     }
 

@@ -1,9 +1,9 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { RequireRole, roleLabel } from "@/components/AuthProvider";
 import { ErrorBox, Loading, SuccessBox } from "@/components/Feedback";
-import { bankApi, useAuditLog, type AuditQuery } from "@/lib/api";
+import { bankApi, prefetchAuditLog, useAuditLog, type AuditQuery } from "@/lib/api";
 import { formatNumber } from "@/lib/format";
 import type { AuditVerification, LedgerVerification, Role } from "@/lib/types";
 
@@ -21,7 +21,12 @@ function AuditLog() {
   const [draft, setDraft] = useState<AuditQuery>({});
   const [filter, setFilter] = useState<AuditQuery>({});
   const [page, setPage] = useState(1);
-  const { data, error, loading } = useAuditLog({ ...filter, page, size: PAGE_SIZE });
+  const { data, error, loading, placeholder } = useAuditLog({ ...filter, page, size: PAGE_SIZE });
+  // Fetch the next page in the background so "次へ" shows it immediately
+  const hasNext = !placeholder && !!data?.hasNext;
+  useEffect(() => {
+    if (hasNext) prefetchAuditLog({ ...filter, page: page + 1, size: PAGE_SIZE });
+  }, [hasNext, filter, page]);
   const [verifying, setVerifying] = useState(false);
   const [verification, setVerification] = useState<AuditVerification | null>(null);
   const [verifyError, setVerifyError] = useState<unknown>(null);
@@ -102,7 +107,7 @@ function AuditLog() {
         <ErrorBox error={error} />
         {!data && !error && <Loading />}
         {data && (
-          <>
+          <div className={placeholder ? "is-stale" : undefined} aria-busy={placeholder}>
             <div className="table-wrap">
               <table>
                 <thead>
@@ -147,7 +152,7 @@ function AuditLog() {
                   onClick={() => setPage(page + 1)}>次へ</button>
               </div>
             </div>
-          </>
+          </div>
         )}
       </section>
     </>

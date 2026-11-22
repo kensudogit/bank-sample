@@ -331,5 +331,40 @@
     <action name="customer-note" class="com.example.bank.action.RiskAction" method="addNote">
       <interceptor-ref name="apiWriteStack"><param name="apiGuardWrite.roles">TELLER,SUPERVISOR</param></interceptor-ref>
     </action>
+
+    <!-- ===== Loan management (provisions / simulation / collateral revaluation / rescheduling) ===== -->
+    <action name="loan-simulate" class="com.example.bank.action.LoanManagementAction" method="simulate"/>
+    <action name="loan-management" class="com.example.bank.action.LoanManagementAction" method="management">
+      <interceptor-ref name="apiReadStack"><param name="apiGuardRead.roles">TELLER,SUPERVISOR</param></interceptor-ref>
+    </action>
+    <action name="loan-provision-run" class="com.example.bank.action.LoanManagementAction" method="provisionRun">
+      <interceptor-ref name="apiWriteStack"><param name="apiGuardWrite.roles">SUPERVISOR</param></interceptor-ref>
+    </action>
+    <action name="loan-provision-summary" class="com.example.bank.action.LoanManagementAction" method="provisionSummary">
+      <interceptor-ref name="apiReadStack"><param name="apiGuardRead.roles">SUPERVISOR</param></interceptor-ref>
+    </action>
+    <action name="collateral-revalue" class="com.example.bank.action.LoanManagementAction" method="revalue">
+      <interceptor-ref name="apiWriteStack"><param name="apiGuardWrite.roles">SUPERVISOR</param></interceptor-ref>
+    </action>
+    <action name="loan-reschedule" class="com.example.bank.action.LoanManagementAction" method="reschedule">
+      <interceptor-ref name="apiWriteStack"><param name="apiGuardWrite.roles">SUPERVISOR</param></interceptor-ref>
+    </action>
+
+    <!-- ===== Information systems (DWH / MIS / customer analytics / reports) ===== -->
+    <action name="dw-status" class="com.example.bank.action.InformationAction" method="status">
+      <interceptor-ref name="apiReadStack"><param name="apiGuardRead.roles">SUPERVISOR</param></interceptor-ref>
+    </action>
+    <action name="dw-load" class="com.example.bank.action.InformationAction" method="load">
+      <interceptor-ref name="apiWriteStack"><param name="apiGuardWrite.roles">SUPERVISOR</param></interceptor-ref>
+    </action>
+    <action name="mis-dashboard" class="com.example.bank.action.InformationAction" method="dashboard">
+      <interceptor-ref name="apiReadStack"><param name="apiGuardRead.roles">SUPERVISOR</param></interceptor-ref>
+    </action>
+    <action name="customer-analytics" class="com.example.bank.action.InformationAction" method="customers">
+      <interceptor-ref name="apiReadStack"><param name="apiGuardRead.roles">TELLER,SUPERVISOR</param><param name="apiGuardRead.audit">true</param></interceptor-ref>
+    </action>
+    <action name="info-report" class="com.example.bank.action.InformationAction" method="report">
+      <interceptor-ref name="apiReadStack"><param name="apiGuardRead.roles">SUPERVISOR</param><param name="apiGuardRead.audit">true</param></interceptor-ref>
+    </action>
   </package>
 </struts>

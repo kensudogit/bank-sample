@@ -267,7 +267,7 @@ class SecurityAndOperationsTest {
 
         clock.set(LocalDateTime.of(2026, 3, 1, 1, 5));
         assertEquals(Arrays.asList(JobRunner.DORMANCY, JobRunner.TIME_MATURITY, JobRunner.LOAN_DUE, JobRunner.DIRECT_DEBIT,
-                JobRunner.INTEREST, JobRunner.LEDGER_CHECK, JobRunner.REQUEST_CLEANUP), jobs.runDue());
+                JobRunner.INTEREST, JobRunner.LEDGER_CHECK, JobRunner.REQUEST_CLEANUP, JobRunner.DW_LOAD), jobs.runDue());
         assertTrue(jobs.runDue().isEmpty());                                   // same day: already done
         assertTrue(new JobRunner(() -> db, clock).runDue().isEmpty());         // another instance too
 
@@ -280,12 +280,12 @@ class SecurityAndOperationsTest {
 
         clock.set(LocalDateTime.of(2026, 3, 2, 1, 5));
         assertEquals(Arrays.asList(JobRunner.DORMANCY, JobRunner.TIME_MATURITY, JobRunner.LOAN_DUE, JobRunner.DIRECT_DEBIT,
-                JobRunner.LEDGER_CHECK, JobRunner.REQUEST_CLEANUP), jobs.runDue());   // no interest
+                JobRunner.LEDGER_CHECK, JobRunner.REQUEST_CLEANUP, JobRunner.DW_LOAD), jobs.runDue());   // no interest
 
         List<Map<String, Object>> runs = jobs.recentRuns(20);
-        assertEquals(13, runs.size());
+        assertEquals(15, runs.size());
         for (Map<String, Object> r : runs) assertEquals("SUCCESS", r.get("outcome"));
-        assertEquals(13L, audit.search(null, null, "SYSTEM", null, null, 1, 50).get("total"));
+        assertEquals(15L, audit.search(null, null, "SYSTEM", null, null, 1, 50).get("total"));
         assertEquals(true, audit.verify().get("valid"));
     }
 

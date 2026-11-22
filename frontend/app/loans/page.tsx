@@ -28,6 +28,7 @@ export default function LoansPage() {
           <h1>融資</h1>
           <p>申込 → 審査 → 承認 → 担保設定・契約 → 実行 → 返済。{user?.customer ? "お申込みはオンラインで受け付けます。" : ""}</p>
         </div>
+        <Link className="btn btn-secondary" href="/loans/simulate">返済シミュレーション</Link>
       </div>
       <div className="tabs" role="tablist">
         {([["loans", "融資一覧"], ["apps", "申込一覧"], ["apply", "新規申込"]] as const).map(([t, label]) => (

@@ -201,11 +201,27 @@ public class LedgerService {
                     + "memo, idempotency_key, created_at, row_hash FROM account_transaction WHERE account_no = ? "
                     // 件数は 1〜200 に丸めた整数なので文字列に埋め込んでも SQL インジェクションにはならない
                     + "ORDER BY tx_id DESC FETCH FIRST " + Math.max(1, Math.min(limit, 200)) + " ROWS ONLY", accountNo);
+            // 明細ごとに監査ログを問い合わせると最大 200 回の DB 往復になる（N+1）ため、冪等キーをまとめて 1 回で取得する。
+            // キーは最大 200 件なので、Oracle の IN リストの上限（1000）に収まる
+            Map<Object, List<Map<String, Object>>> opsByKey = new LinkedHashMap<>();
             for (Map<String, Object> t : txs) {
                 Object key = t.get("idempotencyKey");
-                List<Map<String, Object>> ops = key == null ? new ArrayList<Map<String, Object>>()
-                        : query(c, "SELECT audit_id, occurred_at, user_id, user_role, action, client_ip, outcome FROM audit_log "
-                                + "WHERE request_key = ? ORDER BY audit_id", key);
+                if (key != null) opsByKey.put(key, new ArrayList<Map<String, Object>>());
+            }
+            if (!opsByKey.isEmpty()) {
+                StringBuilder in = new StringBuilder();
+                for (int i = 0; i < opsByKey.size(); i++) in.append(i == 0 ? "?" : ", ?");
+                for (Map<String, Object> op : query(c, "SELECT request_key, audit_id, occurred_at, user_id, user_role, action, "
+                        + "client_ip, outcome FROM audit_log WHERE request_key IN (" + in + ") ORDER BY audit_id",
+                        opsByKey.keySet().toArray())) {
+                    // 応答の形は従来と同じにする（結び付けに使った request_key は返さない）
+                    List<Map<String, Object>> list = opsByKey.get(op.remove("requestKey"));
+                    if (list != null) list.add(op);
+                }
+            }
+            for (Map<String, Object> t : txs) {
+                Object key = t.get("idempotencyKey");
+                List<Map<String, Object>> ops = key == null ? new ArrayList<Map<String, Object>>() : opsByKey.get(key);
                 t.put("operations", ops);
                 if (key == null) t.put("origin", "システム処理（利息・満期・夜間バッチ等）");
             }

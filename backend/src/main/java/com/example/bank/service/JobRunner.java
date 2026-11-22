@@ -27,6 +27,7 @@ import java.util.function.Supplier;
  *   <li>{@value #DORMANCY}: 毎日 休眠前通知の記録・休眠化</li>
  *   <li>{@value #INTEREST}: 3/1・9/1 に全口座の利息決算（2 月末・8 月末までの利息。普通預金の年 2 回決算）</li>
  *   <li>{@value #REQUEST_CLEANUP}: 毎日 {@value #REQUEST_RETENTION_DAYS} 日より古い冪等キーを削除</li>
+ *   <li>{@value #DW_LOAD}: 毎日 前日分を情報系（DWH）に取り込む（DWH が空なら直近 30 日分）。ほかのジョブの後に実行する</li>
  * </ul>
  */
 public class JobRunner {
@@ -38,6 +39,7 @@ public class JobRunner {
     public static final String LOAN_DUE = "LOAN_DUE";
     public static final String DIRECT_DEBIT = "DIRECT_DEBIT";
     public static final String LEDGER_CHECK = "LEDGER_CHECK";
+    public static final String DW_LOAD = "DW_LOAD";
     /** この時刻より前はジョブを開始しない（前日分の取引が出そろってから処理する） */
     public static final LocalTime START_TIME = LocalTime.of(1, 0);
     /** 冪等キーの保存日数（これより古い再送は新しい要求として扱われる） */
@@ -56,6 +58,8 @@ public class JobRunner {
     private final PaymentService payments;
     private final AmlService aml;
     private final LedgerService ledger;
+    private final InformationService information;
+    private final LoanManagementService loanManagement;
     private final JobRunRepository runs = new JobRunRepository();
 
     /**
@@ -75,6 +79,8 @@ public class JobRunner {
         this.payments = new PaymentService(dataSource, clock);
         this.aml = new AmlService(dataSource, clock);
         this.ledger = new LedgerService(dataSource, clock);
+        this.information = new InformationService(dataSource, clock);
+        this.loanManagement = new LoanManagementService(dataSource, clock);
     }
 
     /** AML の取引モニタリング（定期チェックのたびに、前回の続きから）。 */
@@ -106,7 +112,10 @@ public class JobRunner {
 
         if (run(LOAN_DUE, today, () -> {
             Map<String, Object> r = loans.processDue(today);
-            return "融資 " + r.get("loans") + " 件・口座引落し " + r.get("autoDebited") + " 件・延滞 " + r.get("delinquent") + " 件";
+            // 延滞判定で債務者区分が変わった後に、貸倒引当金を見直す
+            Map<String, Object> p = loanManagement.provisionAll(today, "SYSTEM");
+            return "融資 " + r.get("loans") + " 件・口座引落し " + r.get("autoDebited") + " 件・延滞 " + r.get("delinquent")
+                    + " 件・引当見直し " + p.get("changed") + " 件（引当総額 " + p.get("totalProvision") + " 円）";
         })) ran.add(LOAN_DUE);
 
         if (run(DIRECT_DEBIT, today, () -> {
@@ -138,6 +147,12 @@ public class JobRunner {
                     c -> runs.deleteRequestsBefore(c, now.minusDays(REQUEST_RETENTION_DAYS)));
             return "冪等キー " + deleted + " 件を削除";
         })) ran.add(REQUEST_CLEANUP);
+
+        // 情報系の取込みは、前日分の勘定系の処理（満期・返済・口座振替）が終わった後に行う
+        if (run(DW_LOAD, today, () -> {
+            Map<String, Object> r = information.loadPreviousDay();
+            return "情報系 取込 " + r.get("days") + " 日分（" + r.get("from") + " 〜 " + r.get("to") + "）";
+        })) ran.add(DW_LOAD);
         return ran;
     }
 
