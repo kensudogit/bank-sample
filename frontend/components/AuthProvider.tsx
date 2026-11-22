@@ -6,7 +6,7 @@ import { createContext, useCallback, useContext, useEffect, useState } from "rea
 import { Loading } from "@/components/Feedback";
 import { Logo } from "@/components/Logo";
 import { UsageGuidePanel, useGuideOpen } from "@/components/UsageGuidePanel";
-import { IconAlert, IconBook, IconChart, IconDashboard, IconReport, IconTarget, IconGlobe, IconLoan, IconPiggy, IconCog, IconHome, IconKey, IconLogout, IconMenu, IconMoon, IconShield, IconSun, IconTransfer, IconUsers } from "@/components/Icons";
+import { IconAlert, IconBook, IconChart, IconDashboard, IconLayers, IconReport, IconTarget, IconGlobe, IconLoan, IconPiggy, IconCog, IconHome, IconKey, IconLogout, IconMenu, IconMoon, IconShield, IconSun, IconTransfer, IconUsers } from "@/components/Icons";
 import { authApi, UNAUTHENTICATED_EVENT } from "@/lib/api";
 import { clearCache } from "@/lib/query";
 import type { LoginUser, Role } from "@/lib/types";
@@ -186,6 +186,7 @@ function Nav({ user, pathname }: { user: LoginUser; pathname: string }) {
           {item("/risk", "リスク管理", <IconChart />)}
           {item("/aml", "AML", <IconAlert />)}
           {item("/operations", "業務処理", <IconCog />)}
+          {item("/batch", "銀行バッチ", <IconLayers />)}
           {item("/audit", "監査ログ", <IconShield />)}
         </>
       )}

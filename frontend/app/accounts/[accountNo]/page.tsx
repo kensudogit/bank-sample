@@ -89,6 +89,12 @@ export default function AccountDetailPage() {
             <Link className="btn btn-small" href="/transfer">
               <IconTransfer size={16} /> 振込・振替
             </Link>
+            <Link className="btn btn-small" href={`/accounts/${account.accountNo}/certificate`}>残高証明書</Link>
+          </div>
+        )}
+        {!(account.status === "ACTIVE" && account.currency === "JPY" && account.accountType !== "TIME") && (
+          <div className="hero-actions">
+            <Link className="btn btn-small" href={`/accounts/${account.accountNo}/certificate`}>残高証明書</Link>
           </div>
         )}
       </section>

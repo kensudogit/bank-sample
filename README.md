@@ -84,6 +84,14 @@ docker compose exec oracle bash -c "sqlplus -s / as sysdba @/container-entrypoin
 docker compose exec oracle bash -c "sqlplus -s / as sysdba @/container-entrypoint-initdb.d/09_loan_management.sql"
 ```
 
+```bash
+docker compose exec oracle bash -c "sqlplus -s / as sysdba @/container-entrypoint-initdb.d/10_dw_performance.sql"
+```
+
+```bash
+docker compose exec oracle bash -c "sqlplus -s / as sysdba @/container-entrypoint-initdb.d/11_batch_operations.sql"
+```
+
 （Windows の Git Bash では、パスの書き換えを防ぐため先頭に `MSYS_NO_PATHCONV=1` を付けてください）
 
 以前の構成（liberty・frontend が直接ポートを公開）から更新する場合は、`docker compose up -d --build --remove-orphans` でロードバランサー構成に置き換わります。
@@ -127,6 +135,8 @@ docker compose exec oracle bash -c "sqlplus -s / as sysdba @/container-entrypoin
 | `/risk` | リスク管理（役席）: 信用リスク（EAD・期待損失・不良債権比率・格付／債務者区分／商品別・与信集中）、流動性（預貸率）、為替ポジション |
 | `/aml` | AML（役席）: 取引モニタリングのアラート、調査・届出の案件管理 |
 | `/operations` | 業務処理（役席）：夜間バッチの状況と手動実行、利息決算（一括）、休眠預金管理 |
+| `/batch` | 銀行バッチ（役席）：業務一覧（10 業務・担当ジョブ・直近の結果・失敗の再実行）、日次の結果（照合・取引集計・総勘定元帳の日計・利息の日次計上・手数料）、月末締め、帳票出力（CSV） |
+| `/accounts/{口座番号}/certificate` | 残高証明書（指定日の終わりの残高・印刷用。お客さまは本人の口座のみ） |
 | `/audit` | 監査ログ（役席）：検索、ハッシュチェーンによる改ざん検知 |
 | `/mis` | 情報系・経営ダッシュボード（役席）：主要指標と前日比、預金・貸出金残高の推移、期間損益、残高構成、月次サマリー、DWH の取込 |
 | `/analytics` | 情報系・顧客分析（行員）：RFM セグメント、クロスセル候補、離反リスク、顧客一覧（CSV 出力） |
@@ -150,6 +160,12 @@ docker compose exec oracle bash -c "sqlplus -s / as sysdba @/container-entrypoin
 | GET | `/audit-log?from=&to=&userId=&auditAction=&outcome=&page=&size=` | 監査ログ検索（役席） |
 | GET | `/audit-verify` | 監査ログのハッシュチェーン検証（役席） |
 | GET | `/jobs` / POST `/jobs-run` | 夜間バッチの実行履歴／未実行ジョブの即時実行（役席） |
+| GET | `/batch-catalog` | 銀行バッチの業務一覧と担当ジョブ・直近の結果（役席） |
+| POST | `/batch-rerun` | 失敗したジョブの再実行 `{"jobName","runDate"}`（役席。成功したジョブは不可） |
+| GET | `/batch-daily?date=` | 業務日のバッチ結果：照合・取引集計・総勘定元帳の日計・利息の日次計上・手数料（役席） |
+| GET | `/month-closes` | 月末締めの一覧（役席） |
+| GET | `/report-outputs` / `/report-output?reportId=` | 帳票の一覧／本文（CSV。役席・本文の閲覧は監査ログに記録） |
+| GET | `/balance-certificate?accountNo=&date=` | 残高証明書（お客さまは本人の口座のみ・閲覧は監査ログに記録） |
 | GET | `/dw-status` | 情報系 DWH の取込済み期間と最終取込（役席） |
 | GET | `/loan-simulate?amount=&rate=&termMonths=&repaymentMethod=&paymentDay=` | 返済シミュレーション（ログイン中の全員。DB には書き込まない） |
 | GET | `/loan-management?loanId=` | 融資の管理情報：引当（必要額・履歴）、担保の掛目・保全額・再評価履歴、条件変更の履歴（行員） |
@@ -208,6 +224,9 @@ Windows でスクリプトや curl から呼ぶ場合は `localhost` ではな�
 | Liberty | `statementCacheSize=30`（全 SQL を解析済みで再利用）、`queryTimeout=30s`（ロック待ち等で接続を抱え込まない）、`minPoolSize=5`、DB 再起動時は `purgePolicy=EntirePool` で古い接続を一括破棄、`oracle.net.CONNECT_TIMEOUT=5000` |
 | フロント | `lib/query.ts` の stale-while-revalidate キャッシュ（メモリのみ）。画面遷移時は直前のデータを即表示して裏で再取得、同一リクエストは 1 本に集約、口座リンクのホバー／フォーカスで詳細を先読み、タブ復帰時に再取得 |
 | フロント | 入金・出金・振込の後は（成功・失敗にかかわらず）関係口座のキャッシュを無効化し、表示中の画面は自動で最新化 |
+| 融資 | 返済予定表の返済日（休業日なら翌営業日）は、期間分の休日を 1 回の照会で読み込んで判定（`BusinessCalendar.Holidays`）。420 回の予定表で 420 回あった休日の照会が 1 回に（返済シミュレーション・融資実行・条件変更） |
+| 情報系 | 日次の取込みは、前日のスナップショットがあれば「前日の残高・融資残高・最終取引日 + その日の明細だけ」で作る（差分取込み）。明細の総数に関係なく 1 日分の明細量で済む。前日がない日（初回・期間取込みの初日）だけ全履歴から作り直す。差分と作り直しの結果が一致することをテストで確認 |
+| DB | 取引日時の索引 `account_transaction (created_at)`・`loan_transaction (created_at)`（10_dw_performance.sql）。1 日分・期間の明細（情報系の取込み・90 日の取引回数・取引集計表）を全件走査せずに取得 |
 
 ## 業務ルールと整合性
 
@@ -244,7 +263,30 @@ Windows でスクリプトや curl から呼ぶ場合は `localhost` ではな�
 
 - Liberty 内で 10 分ごとに確認し、毎日 01:00 以降に実行（`BANK_JOBS_ENABLED=true`、compose の既定は有効）。
 - 休眠管理・定期預金の満期処理・融資の約定返済と延滞判定・貸倒引当金の見直し・口座振替（毎日）、取引元帳の整合性検証（毎日・不整合があればジョブ失敗として記録）、古い冪等キーの削除（90 日超・毎日）、情報系への前日分の取込み `DW_LOAD`（毎日・最後に実行）、利息決算（3/1・9/1 に 2 月末・8 月末までを決算）、AML の取引モニタリング（10 分ごと）。
-- 実行権は `JOB_RUN` の主キー（ジョブ名 + 業務日）で取得するため、再起動や複数インスタンスでも 1 日 1 回。失敗したジョブはその日は再実行されないため、業務処理画面の結果を確認し、必要なら各処理を手動で実行してください。
+- 実行権は `JOB_RUN` の主キー（ジョブ名 + 業務日）で取得するため、再起動や複数インスタンスでも 1 日 1 回。失敗したジョブはその日は自動では再実行されません。銀行バッチ画面で原因を確認し、直してから「再実行」してください（失敗したジョブだけ再実行できる）。
+
+### 銀行バッチ（日次・月次）
+
+夜間バッチは次の順に実行します（日次の集計・照合・帳票は前日分を処理）。どのジョブもその業務日の結果を消して作り直すため、
+再実行しても結果は同じです。照合で NG が出たジョブは、結果を保存したうえで失敗として記録します（`11_batch_operations.sql`）。
+
+| # | 業務 | 処理内容 | タイミング | ジョブ |
+|---|---|---|---|---|
+| 1 | 日次取引集計 | 取引種別・通貨ごとの件数・金額（`batch_daily_summary`） | 毎日 | `DAILY_SUMMARY` |
+| 2 | 残高照合 | 口座残高と明細の整合性（残高の連続性・ハッシュチェーン・振込の対応） | 毎日 | `LEDGER_CHECK` |
+| 3 | 預金利息計算 | 日々の最終残高 × 年利 ÷ 365 を計上し、前回決算からの累計を未払利息とする（普通・貯蓄・通知・定期）。3/1・9/1 に決算して利払い | 毎日・利払日 | `INTEREST_ACCRUAL` / `INTEREST_SETTLEMENT` |
+| 4 | 融資返済 | 約定返済日に返済口座から元金・利息を引落し | 約定返済日 | `LOAN_DUE` |
+| 5 | 延滞判定 | 未返済の回を延滞にし、債務者区分・貸倒引当金を更新 | 毎日 | `LOAN_DUE` |
+| 6 | 手数料計算 | 他行振込（330／440 円）・海外送金（4,000 円）が料金表どおりか、明細の手数料と一致するか。月次は月末締めで集計 | 毎日・月次 | `FEE_CHECK` |
+| 7 | 為替照合 | 全銀データと振込の件数・金額、送金の明細と受付データ、未送信・未決済・保留の滞留 | 毎日 | `REMIT_RECON` |
+| 8 | 会計仕訳集計 | 補助元帳（円口座の明細・融資取引・引当）を勘定科目に仕訳して総勘定元帳の日計を作り、貸借一致・融資決済勘定の相殺・預金科目 = 口座残高・貸出金科目 = 融資残高を照合 | 毎日 | `GL_POSTING` |
+| 9 | 月末締め | 月末残高・月次の取引と収益・未払利息を確定。その月の照合に NG があれば EXCEPTION | 毎月 1 日に前月分 | `MONTH_END` |
+| 10 | 帳票出力 | 取引明細表・日計表（日次）、月末残高一覧・月次集計表（月初）を CSV で作成。残高証明書は随時 | 毎日・月次 | `REPORTS` |
+
+- 勘定科目（`gl_account`）：現金 1000・為替決済勘定 1100・貸出金 1300・融資決済勘定 1350・貸倒引当金 1390・外国為替 1900・預金 2000・
+  未払源泉税 2600・貸出金利息 4100・延滞損害金 4110・手数料 4200・貸倒引当金戻入益 4900・預金利息 5000・貸倒引当金繰入額 5100・貸倒損失 5110。
+- 預金の口座側の振替（振込・定期への預入れ・解約の払戻し）は預金同士の振替、他行との送金・口座振替は為替決済勘定に仕訳します。
+- 簡略化：会計仕訳集計は円口座だけを対象とし（外貨預金は外国為替勘定で受ける）、手数料の返金は為替決済勘定に仕訳します。
 
 ### 情報系（DWH・経営管理・顧客分析・帳票）
 

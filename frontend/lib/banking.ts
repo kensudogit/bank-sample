@@ -95,6 +95,17 @@ export const riskApi = {
     post<Row[]>("/customer-note", { customerId, noteType, content }),
 };
 
+// ---------------- bank batch ----------------
+export const batchApi = {
+  catalog: () => get("/batch-catalog"),
+  rerun: (jobName: string, runDate: string) => post("/batch-rerun", { jobName, runDate }),
+  daily: (date?: string) => get("/batch-daily", { date }),
+  monthCloses: () => get<Row[]>("/month-closes"),
+  reports: () => get<Row[]>("/report-outputs"),
+  report: (reportId: string) => get("/report-output", { reportId }),
+  certificate: (accountNo: string, date?: string) => get("/balance-certificate", { accountNo, date }),
+};
+
 // ---------------- information systems (DWH / MIS / analytics / reports) ----------------
 export type ReportType = "DEPOSIT_BALANCE" | "LOAN_BALANCE" | "TX_SUMMARY" | "KPI_TREND" | "CUSTOMER_ASSETS";
 export const infoApi = {
@@ -137,3 +148,7 @@ export const useInfoReport = (type: ReportType, q: { date?: string; from?: strin
     { keepPreviousWithin: "report" });
 export const useLoanManagement = (loanId: string) => useQuery(`loan-mgmt:${loanId}`, () => loanApi.management(loanId));
 export const useProvisionSummary = () => useQuery("provision-summary", loanApi.provisionSummary);
+export const useBatchCatalog = () => useQuery("batch-catalog", batchApi.catalog);
+export const useBatchDaily = (date?: string) => useQuery(`batch-daily:${date ?? ""}`, () => batchApi.daily(date), { keepPreviousWithin: "batch-daily" });
+export const useMonthCloses = () => useQuery("month-closes", batchApi.monthCloses);
+export const useReportOutputs = () => useQuery("report-outputs", batchApi.reports);

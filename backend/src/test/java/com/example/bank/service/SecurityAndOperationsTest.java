@@ -266,8 +266,11 @@ class SecurityAndOperationsTest {
         assertTrue(jobs.runDue().isEmpty());   // before 01:00
 
         clock.set(LocalDateTime.of(2026, 3, 1, 1, 5));
+        // 3/1 は利息決算日かつ月初（前月の月末締め）
         assertEquals(Arrays.asList(JobRunner.DORMANCY, JobRunner.TIME_MATURITY, JobRunner.LOAN_DUE, JobRunner.DIRECT_DEBIT,
-                JobRunner.INTEREST, JobRunner.LEDGER_CHECK, JobRunner.REQUEST_CLEANUP, JobRunner.DW_LOAD), jobs.runDue());
+                JobRunner.INTEREST_ACCRUAL, JobRunner.INTEREST, JobRunner.LEDGER_CHECK, JobRunner.DAILY_SUMMARY, JobRunner.FEE_CHECK,
+                JobRunner.REMIT_RECON, JobRunner.GL_POSTING, JobRunner.MONTH_END, JobRunner.REPORTS, JobRunner.REQUEST_CLEANUP,
+                JobRunner.DW_LOAD), jobs.runDue());
         assertTrue(jobs.runDue().isEmpty());                                   // same day: already done
         assertTrue(new JobRunner(() -> db, clock).runDue().isEmpty());         // another instance too
 
@@ -280,12 +283,13 @@ class SecurityAndOperationsTest {
 
         clock.set(LocalDateTime.of(2026, 3, 2, 1, 5));
         assertEquals(Arrays.asList(JobRunner.DORMANCY, JobRunner.TIME_MATURITY, JobRunner.LOAN_DUE, JobRunner.DIRECT_DEBIT,
-                JobRunner.LEDGER_CHECK, JobRunner.REQUEST_CLEANUP, JobRunner.DW_LOAD), jobs.runDue());   // no interest
+                JobRunner.INTEREST_ACCRUAL, JobRunner.LEDGER_CHECK, JobRunner.DAILY_SUMMARY, JobRunner.FEE_CHECK, JobRunner.REMIT_RECON,
+                JobRunner.GL_POSTING, JobRunner.REPORTS, JobRunner.REQUEST_CLEANUP, JobRunner.DW_LOAD), jobs.runDue());   // no interest
 
-        List<Map<String, Object>> runs = jobs.recentRuns(20);
-        assertEquals(15, runs.size());
+        List<Map<String, Object>> runs = jobs.recentRuns(50);
+        assertEquals(28, runs.size());
         for (Map<String, Object> r : runs) assertEquals("SUCCESS", r.get("outcome"));
-        assertEquals(15L, audit.search(null, null, "SYSTEM", null, null, 1, 50).get("total"));
+        assertEquals(28L, audit.search(null, null, "SYSTEM", null, null, 1, 50).get("total"));
         assertEquals(true, audit.verify().get("valid"));
     }
 

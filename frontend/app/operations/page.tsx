@@ -28,6 +28,17 @@ const jobLabel: Record<string, string> = {
   INTEREST_SETTLEMENT: "利息決算",
   REQUEST_CLEANUP: "冪等キー整理",
   DW_LOAD: "情報系取込",
+  TIME_MATURITY: "定期満期",
+  LOAN_DUE: "融資返済・延滞",
+  DIRECT_DEBIT: "口座振替",
+  LEDGER_CHECK: "残高照合",
+  INTEREST_ACCRUAL: "利息の日次計上",
+  DAILY_SUMMARY: "日次取引集計",
+  FEE_CHECK: "手数料計算",
+  REMIT_RECON: "為替照合",
+  GL_POSTING: "会計仕訳集計",
+  MONTH_END: "月末締め",
+  REPORTS: "帳票出力",
 };
 
 function NightlyJobs() {

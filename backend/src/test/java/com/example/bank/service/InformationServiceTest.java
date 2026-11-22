@@ -3,6 +3,7 @@ package com.example.bank.service;
 import com.example.bank.domain.BankException;
 import com.example.bank.domain.ErrorCode;
 import com.example.bank.service.SecurityAndOperationsTest.MutableClock;
+import com.example.bank.support.BusinessCalendar;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.function.Executable;
@@ -13,6 +14,8 @@ import java.sql.ResultSet;
 import java.sql.Statement;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.sql.ResultSetMetaData;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -239,5 +242,89 @@ class InformationServiceTest {
         assertEquals("2026-11-19", s.get("firstDate"));
         assertEquals("2026-11-20", s.get("lastDate"));
         assertYen(2, s.get("days"));
+    }
+
+    // 指定日のスナップショットを行の文字列にして並べる（取込日時・実行者は比較しない）
+    private List<String> dump(String table, String date) throws Exception {
+        List<String> rows = new ArrayList<>();
+        try (Connection c = db.getConnection(); Statement st = c.createStatement();
+             ResultSet rs = st.executeQuery("SELECT * FROM " + table + " WHERE snapshot_date = DATE '" + date + "' ORDER BY 2")) {
+            ResultSetMetaData md = rs.getMetaData();
+            while (rs.next()) {
+                StringBuilder sb = new StringBuilder();
+                for (int i = 1; i <= md.getColumnCount(); i++) {
+                    String col = md.getColumnLabel(i).toLowerCase();
+                    if (col.equals("loaded_at") || col.equals("loaded_by")) continue;
+                    Object v = rs.getObject(i);
+                    sb.append(col).append('=').append(v instanceof BigDecimal ? ((BigDecimal) v).stripTrailingZeros().toPlainString() : v)
+                            .append(';');
+                }
+                rows.add(sb.toString());
+            }
+        }
+        return rows;
+    }
+
+    private static final List<String> DW_TABLES = java.util.Arrays.asList(
+            "dw_account_daily", "dw_loan_daily", "dw_customer_daily", "dw_daily_kpi");
+
+    /** 差分取込み（前日のスナップショット + その日の明細）は、全履歴からの作り直しと同じ結果になる。 */
+    @Test
+    void incrementalLoadMatchesFullRebuild() throws Exception {
+        LoanService loans = new LoanService(() -> db, clock);
+        // 11/19：入金・振込・住宅ローンの実行
+        clock.set(LocalDateTime.of(2026, 11, 19, 10, 0));
+        bank.deposit("1000001", BigDecimal.valueOf(50_000), "a", key());
+        bank.transfer("1000003", "1000004", BigDecimal.valueOf(10_000), "b", key());
+        LoanService.Application a = new LoanService.Application();
+        a.customerId = "CU0001";
+        a.product = "HOUSING";
+        a.amount = BigDecimal.valueOf(20_000_000);
+        a.termMonths = 240;
+        a.repaymentMethod = "EQUAL_PAYMENT";
+        a.annualIncome = BigDecimal.valueOf(9_000_000);
+        a.collateralValue = BigDecimal.valueOf(40_000_000);
+        long appId = new BigDecimal(loans.apply(a, "teller1").get("applicationId").toString()).longValue();
+        loans.screen(appId, "teller1");
+        loans.decide(appId, true, "承認", null, "supervisor1");
+        loans.addCollateral(appId, "REAL_ESTATE", "土地", BigDecimal.valueOf(40_000_000), 1, null, "teller1");
+        long loanId = new BigDecimal(loans.contract(appId, "1000001", 27, "teller1").get("loanId").toString()).longValue();
+        loans.disburse(loanId, "teller1", key());
+        // 11/20：出金・繰上返済・入金（前日の値に上書きされる口座と、変化しない口座がある）
+        clock.set(LocalDateTime.of(2026, 11, 20, 11, 0));
+        bank.withdraw("1000001", BigDecimal.valueOf(20_000), "c", key());
+        loans.prepay(loanId, BigDecimal.valueOf(1_000_000), "teller1", key());
+        bank.deposit("1000004", BigDecimal.valueOf(5_000), "d", key());
+
+        clock.set(LocalDateTime.of(2026, 11, 21, 9, 0));
+        List<Map<String, Object>> both = info.load(d("2026-11-19"), d("2026-11-20"), "tester");
+        assertEquals("full", both.get(0).get("mode"));            // 11/18 のスナップショットがない
+        assertEquals("incremental", both.get(1).get("mode"));     // 11/19 から差分で
+        List<List<String>> incremental = new ArrayList<>();
+        for (String t : DW_TABLES) incremental.add(dump(t, "2026-11-20"));
+        assertFalse(incremental.get(1).isEmpty(), "融資のスナップショットがある");
+
+        // 取込済みのデータを消して 11/20 だけを取り込む → 全履歴からの作り直し
+        try (Connection c = db.getConnection(); Statement st = c.createStatement()) {
+            for (String t : DW_TABLES) st.execute("DELETE FROM " + t);
+        }
+        List<Map<String, Object>> single = info.load(d("2026-11-20"), d("2026-11-20"), "tester");
+        assertEquals("full", single.get(0).get("mode"));
+        for (int i = 0; i < DW_TABLES.size(); i++) {
+            assertEquals(incremental.get(i), dump(DW_TABLES.get(i), "2026-11-20"), DW_TABLES.get(i));
+        }
+    }
+
+    /** まとめて読み込んだ休日カレンダーは、1 日ずつ照会するカレンダーと同じ営業日を返す（年末年始を含む）。 */
+    @Test
+    void bulkHolidayCalendarMatchesPerDayLookups() throws Exception {
+        try (Connection c = db.getConnection()) {
+            LocalDate from = LocalDate.of(2026, 11, 1);
+            // 読み込む範囲を短くして、範囲を超えたときの追加読み込みも確かめる
+            BusinessCalendar.Holidays h = BusinessCalendar.Holidays.load(c, from, from.plusMonths(1));
+            for (LocalDate day = from; day.isBefore(LocalDate.of(2028, 1, 10)); day = day.plusDays(1)) {
+                assertEquals(BusinessCalendar.onOrAfter(c, day), h.onOrAfter(day), day.toString());
+            }
+        }
     }
 }

@@ -489,3 +489,28 @@ input[type="checkbox"] { min-height: 0; width: 16px; height: 16px; accent-color:
   form, form.wide { max-width: none; }
   .filters label { min-width: 0; flex: 1 1 140px; }
 }
+
+/* ---------- Batch catalog ---------- */
+.job-line { display: flex; flex-wrap: wrap; gap: 4px 12px; align-items: center; padding: 6px 0; border-bottom: 1px dashed var(--border); }
+.job-line:last-child { border-bottom: 0; }
+.job-detail { flex-basis: 100%; font-size: 0.78rem; }
+
+/* ---------- Balance certificate (printable) ---------- */
+.certificate { max-width: 720px; margin: 0 auto; padding: 40px 48px; }
+.cert-meta { text-align: right; color: var(--muted); margin: 0; }
+.cert-title { text-align: center; font-size: 1.6rem; letter-spacing: 0.4em; margin: 16px 0 28px; }
+.cert-to { font-size: 1.15rem; margin: 0 0 4px; }
+.cert-lead { margin: 24px 0 16px; }
+.cert-table { width: 100%; border-collapse: collapse; }
+.cert-table th, .cert-table td { border: 1px solid var(--border-strong); padding: 10px 14px; text-align: left; }
+.cert-table th { width: 30%; background: var(--surface-2); }
+.cert-amount { font-size: 1.3rem; font-weight: 800; font-variant-numeric: tabular-nums; }
+.cert-note { color: var(--muted); font-size: 0.82rem; margin-top: 16px; }
+.cert-bank { text-align: right; margin-top: 32px; font-weight: 700; }
+@media print {
+  .sidebar, .topbar, .footer, .no-print, [role="dialog"] { display: none !important; }
+  .shell { display: block; }
+  .content, main.container { padding: 0; }
+  .certificate { box-shadow: none; border: 0; }
+  body { background: #fff; color: #000; }
+}

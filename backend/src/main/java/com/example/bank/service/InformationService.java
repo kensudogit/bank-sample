@@ -142,16 +142,30 @@ public class InformationService {
             ttm.put((String) r.get("currency"), LoanService.num(r.get("ttm")));
         }
 
+        // 前日のスナップショットがあれば差分で取り込む（前日の値 + その日の明細だけ）。なければ全履歴から作り直す
+        LocalDate prev = day.minusDays(1);
+        boolean incremental = !query(c, "SELECT 1 FROM dw_daily_kpi WHERE snapshot_date = ?", prev).isEmpty();
+
         // ---- 口座残高：その日の最後の明細の取引後残高
-        Map<String, BigDecimal> lastBalance = new HashMap<>();
-        for (Map<String, Object> r : query(c, "SELECT account_no, balance_after FROM (SELECT account_no, balance_after, "
-                + "ROW_NUMBER() OVER (PARTITION BY account_no ORDER BY created_at DESC, tx_id DESC) AS rn "
-                + "FROM account_transaction WHERE created_at < ?) x WHERE rn = 1", end)) {
-            lastBalance.put((String) r.get("accountNo"), LoanService.num(r.get("balanceAfter")));
-        }
         List<Map<String, Object>> accounts = query(c, "SELECT account_no, customer_id, account_type, currency, status, "
                 + "opened_at, closed_at, dormant_at FROM account WHERE opened_at < ? "
                 + "AND (closed_at IS NULL OR closed_at >= ?) ORDER BY account_no", end, start);
+        Map<String, BigDecimal> lastBalance = new HashMap<>();
+        if (incremental) {
+            for (Map<String, Object> r : query(c, "SELECT account_no, balance FROM dw_account_daily WHERE snapshot_date = ?", prev)) {
+                lastBalance.put((String) r.get("accountNo"), LoanService.num(r.get("balance")));
+            }
+            // 前日のスナップショットにない既存口座（通常はない）だけは、その口座の全履歴から求める
+            List<Object> missing = new ArrayList<>();
+            for (Map<String, Object> a : accounts) {
+                String no = (String) a.get("accountNo");
+                if (!lastBalance.containsKey(no) && !between(a.get("openedAt"), start, end)) missing.add(no);
+            }
+            if (!missing.isEmpty()) lastBalance.putAll(lastBalances(c, end, null, missing));
+            lastBalance.putAll(lastBalances(c, end, start, Collections.emptyList()));
+        } else {
+            lastBalance.putAll(lastBalances(c, end, null, Collections.emptyList()));
+        }
         List<Object[]> accountRows = new ArrayList<>();
         Map<String, BigDecimal> balanceByAccount = new HashMap<>();
         Map<String, List<Map<String, Object>>> accountsByCustomer = new HashMap<>();
@@ -188,10 +202,17 @@ public class InformationService {
                 + "balance, balance_jpy) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", accountRows);
 
         // ---- 貸出残高：その日の最後の融資取引の残高（当座貸越は返済口座のマイナス残高）
+        // 差分取込みでは前日の残高（スナップショットにない融資は残高 0）に、その日の融資取引を上書きする
         Map<Long, BigDecimal> lastOutstanding = new HashMap<>();
+        if (incremental) {
+            for (Map<String, Object> r : query(c, "SELECT loan_id, outstanding FROM dw_loan_daily WHERE snapshot_date = ?", prev)) {
+                lastOutstanding.put(LoanService.num(r.get("loanId")).longValue(), LoanService.num(r.get("outstanding")));
+            }
+        }
         for (Map<String, Object> r : query(c, "SELECT loan_id, outstanding_after FROM (SELECT loan_id, outstanding_after, "
                 + "ROW_NUMBER() OVER (PARTITION BY loan_id ORDER BY created_at DESC, loan_tx_id DESC) AS rn "
-                + "FROM loan_transaction WHERE created_at < ?) x WHERE rn = 1", end)) {
+                + "FROM loan_transaction WHERE created_at < ?" + (incremental ? " AND created_at >= ?" : "") + ") x WHERE rn = 1",
+                incremental ? new Object[]{end, start} : new Object[]{end})) {
             lastOutstanding.put(LoanService.num(r.get("loanId")).longValue(), LoanService.num(r.get("outstandingAfter")));
         }
         List<Map<String, Object>> loans = query(c, "SELECT loan_id, customer_id, product, grade, borrower_class, "
@@ -219,12 +240,22 @@ public class InformationService {
         Map<String, String> lastActivity = new HashMap<>();
         Map<String, Integer> frequency = new HashMap<>();
         String inTypes = placeholders(CUSTOMER_TX.size());
-        List<Object> p1 = new ArrayList<>(CUSTOMER_TX);
-        p1.add(end);
-        for (Map<String, Object> r : query(c, "SELECT a.customer_id, MAX(t.created_at) AS last_at FROM account_transaction t "
-                + "JOIN account a ON a.account_no = t.account_no WHERE t.tx_type IN (" + inTypes + ") AND t.created_at < ? "
-                + "GROUP BY a.customer_id", p1.toArray())) {
-            lastActivity.put((String) r.get("customerId"), (String) r.get("lastAt"));
+        Set<String> customerIds = new HashSet<>(accountsByCustomer.keySet());
+        customerIds.addAll(loansByCustomer.keySet());
+        if (incremental) {
+            // 前日の最終取引日に、その日の取引だけを重ねる（前日のスナップショットにない顧客は、その顧客の全履歴から）
+            Set<String> known = new HashSet<>();
+            for (Map<String, Object> r : query(c, "SELECT customer_id, last_activity FROM dw_customer_daily "
+                    + "WHERE snapshot_date = ?", prev)) {
+                known.add((String) r.get("customerId"));
+                if (r.get("lastActivity") != null) lastActivity.put((String) r.get("customerId"), (String) r.get("lastActivity"));
+            }
+            List<Object> missing = new ArrayList<>();
+            for (String cid : customerIds) if (!known.contains(cid)) missing.add(cid);
+            if (!missing.isEmpty()) lastActivity.putAll(lastActivities(c, inTypes, end, null, missing));
+            lastActivity.putAll(lastActivities(c, inTypes, end, start, Collections.emptyList()));
+        } else {
+            lastActivity.putAll(lastActivities(c, inTypes, end, null, Collections.emptyList()));
         }
         List<Object> p2 = new ArrayList<>(CUSTOMER_TX);
         p2.add(end.minusDays(90));
@@ -238,8 +269,6 @@ public class InformationService {
         for (Map<String, Object> r : query(c, "SELECT customer_id, customer_type FROM customer WHERE created_at < ?", end)) {
             customerTypes.put((String) r.get("customerId"), (String) r.get("customerType"));
         }
-        Set<String> customerIds = new HashSet<>(accountsByCustomer.keySet());
-        customerIds.addAll(loansByCustomer.keySet());
         List<Object[]> customerRows = new ArrayList<>();
         Map<String, Integer> segmentCounts = new TreeMap<>();
         for (String cid : customerIds) {
@@ -296,12 +325,68 @@ public class InformationService {
 
         Map<String, Object> m = new LinkedHashMap<>();
         m.put("date", day.toString());
+        m.put("mode", incremental ? "incremental" : "full");
         m.put("accounts", accountRows.size());
         m.put("loans", loanRows.size());
         m.put("customers", customerRows.size());
         m.put("totalDeposits", deposits);
         m.put("totalLoans", totalLoans);
         m.put("segments", segmentCounts);
+        return m;
+    }
+
+    /**
+     * 口座ごとの最後の明細の取引後残高（end より前）。
+     *
+     * @param from     null でなければ from 以降の明細だけを見る（差分取込み）
+     * @param accounts 空でなければこの口座だけ
+     */
+    private static Map<String, BigDecimal> lastBalances(Connection c, LocalDateTime end, LocalDateTime from, List<Object> accounts)
+            throws SQLException {
+        List<Object> params = new ArrayList<>();
+        params.add(end);
+        StringBuilder where = new StringBuilder("created_at < ?");
+        if (from != null) {
+            where.append(" AND created_at >= ?");
+            params.add(from);
+        }
+        if (!accounts.isEmpty()) {
+            where.append(" AND account_no IN (").append(placeholders(accounts.size())).append(")");
+            params.addAll(accounts);
+        }
+        Map<String, BigDecimal> m = new HashMap<>();
+        for (Map<String, Object> r : query(c, "SELECT account_no, balance_after FROM (SELECT account_no, balance_after, "
+                + "ROW_NUMBER() OVER (PARTITION BY account_no ORDER BY created_at DESC, tx_id DESC) AS rn "
+                + "FROM account_transaction WHERE " + where + ") x WHERE rn = 1", params.toArray())) {
+            m.put((String) r.get("accountNo"), LoanService.num(r.get("balanceAfter")));
+        }
+        return m;
+    }
+
+    /**
+     * 顧客ごとの最終取引日（お客さまの意思による取引、end より前。yyyy-MM-dd）。
+     *
+     * @param from      null でなければ from 以降の明細だけを見る（差分取込み）
+     * @param customers 空でなければこの顧客だけ
+     */
+    private static Map<String, String> lastActivities(Connection c, String inTypes, LocalDateTime end, LocalDateTime from,
+                                                      List<Object> customers) throws SQLException {
+        List<Object> params = new ArrayList<>(CUSTOMER_TX);
+        params.add(end);
+        StringBuilder where = new StringBuilder("t.tx_type IN (" + inTypes + ") AND t.created_at < ?");
+        if (from != null) {
+            where.append(" AND t.created_at >= ?");
+            params.add(from);
+        }
+        if (!customers.isEmpty()) {
+            where.append(" AND a.customer_id IN (").append(placeholders(customers.size())).append(")");
+            params.addAll(customers);
+        }
+        Map<String, String> m = new HashMap<>();
+        for (Map<String, Object> r : query(c, "SELECT a.customer_id, MAX(t.created_at) AS last_at FROM account_transaction t "
+                + "JOIN account a ON a.account_no = t.account_no WHERE " + where + " GROUP BY a.customer_id", params.toArray())) {
+            m.put((String) r.get("customerId"), ((String) r.get("lastAt")).substring(0, 10));
+        }
         return m;
     }
 

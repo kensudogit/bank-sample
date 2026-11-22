@@ -1,0 +1,135 @@
+-- Bank batch operations: daily transaction summary, daily deposit-interest accrual, fee checks, remittance
+-- reconciliation, general-ledger summary from the sub-ledgers, month-end close and report outputs.
+-- Runs after the previous scripts on first database creation. For an existing database apply it once:
+--   docker compose exec oracle bash -c "sqlplus -s / as sysdba @/container-entrypoint-initdb.d/11_batch_operations.sql"
+ALTER SESSION SET CONTAINER = FREEPDB1;
+ALTER SESSION SET CURRENT_SCHEMA = BANK;
+
+-- 日次取引集計（取引種別・通貨別）
+CREATE TABLE batch_daily_summary (
+  business_date  DATE           NOT NULL,
+  tx_type        VARCHAR2(12)   NOT NULL,
+  currency       VARCHAR2(3)    NOT NULL,
+  tx_count       NUMBER(10)     NOT NULL,
+  amount         NUMBER(17,0)   NOT NULL,
+  CONSTRAINT pk_batch_daily_summary PRIMARY KEY (business_date, tx_type, currency)
+);
+
+-- 預金利息の日次計上（その日の最終残高 × 年利 ÷ 365。前回の利息決算からの累計 = 未払利息）
+CREATE TABLE deposit_interest_accrual (
+  business_date   DATE           NOT NULL,
+  account_no      VARCHAR2(7)    NOT NULL,
+  account_type    VARCHAR2(10)   NOT NULL,
+  balance         NUMBER(15,0)   NOT NULL,
+  annual_rate     NUMBER(7,5)    NOT NULL,
+  daily_interest  NUMBER(17,4)   NOT NULL,
+  cumulative      NUMBER(17,4)   NOT NULL,
+  CONSTRAINT pk_deposit_interest_accrual PRIMARY KEY (business_date, account_no)
+);
+
+-- 手数料の計算・照合（料金表どおりの金額か、明細に計上された手数料と一致するか）
+CREATE TABLE fee_summary (
+  business_date    DATE           NOT NULL,
+  fee_type         VARCHAR2(20)   NOT NULL,
+  fee_count        NUMBER(10)     NOT NULL,
+  charged_amount   NUMBER(17,0)   NOT NULL,
+  expected_amount  NUMBER(17,0)   NOT NULL,
+  mismatch_count   NUMBER(10)     NOT NULL,
+  CONSTRAINT pk_fee_summary PRIMARY KEY (business_date, fee_type)
+);
+
+-- 照合結果（為替照合・会計照合・月末締めの前提チェックなど）。NG があるとジョブは失敗として記録する
+CREATE TABLE batch_check (
+  business_date  DATE                NOT NULL,
+  check_group    VARCHAR2(20)        NOT NULL,
+  check_item     VARCHAR2(60 CHAR)   NOT NULL,
+  result         VARCHAR2(4)         NOT NULL,
+  expected       NUMBER(19,0),
+  actual         NUMBER(19,0),
+  detail         VARCHAR2(400 CHAR),
+  checked_at     TIMESTAMP           NOT NULL,
+  CONSTRAINT pk_batch_check PRIMARY KEY (business_date, check_group, check_item),
+  CONSTRAINT ck_batch_check_result CHECK (result IN ('OK', 'WARN', 'NG'))
+);
+
+-- 勘定科目（補助元帳＝口座明細・融資取引から総勘定元帳の日計を作るための科目）
+CREATE TABLE gl_account (
+  gl_code   VARCHAR2(4)          NOT NULL,
+  name      VARCHAR2(40 CHAR)    NOT NULL,
+  category  VARCHAR2(10)         NOT NULL,
+  CONSTRAINT pk_gl_account PRIMARY KEY (gl_code),
+  CONSTRAINT ck_gl_category CHECK (category IN ('ASSET', 'LIABILITY', 'INCOME', 'EXPENSE'))
+);
+INSERT INTO gl_account VALUES ('1000', '現金', 'ASSET');
+INSERT INTO gl_account VALUES ('1100', '為替決済勘定', 'ASSET');
+INSERT INTO gl_account VALUES ('1300', '貸出金', 'ASSET');
+INSERT INTO gl_account VALUES ('1350', '融資決済勘定', 'ASSET');
+INSERT INTO gl_account VALUES ('1390', '貸倒引当金', 'ASSET');
+INSERT INTO gl_account VALUES ('1900', '外国為替', 'ASSET');
+INSERT INTO gl_account VALUES ('2000', '預金', 'LIABILITY');
+INSERT INTO gl_account VALUES ('2600', '未払源泉税', 'LIABILITY');
+INSERT INTO gl_account VALUES ('4100', '貸出金利息', 'INCOME');
+INSERT INTO gl_account VALUES ('4110', '延滞損害金', 'INCOME');
+INSERT INTO gl_account VALUES ('4200', '役務取引等収益（手数料）', 'INCOME');
+INSERT INTO gl_account VALUES ('4900', '貸倒引当金戻入益', 'INCOME');
+INSERT INTO gl_account VALUES ('5000', '預金利息', 'EXPENSE');
+INSERT INTO gl_account VALUES ('5100', '貸倒引当金繰入額', 'EXPENSE');
+INSERT INTO gl_account VALUES ('5110', '貸倒損失', 'EXPENSE');
+
+-- 総勘定元帳の日計（科目別の借方・貸方）
+CREATE TABLE gl_daily (
+  business_date  DATE           NOT NULL,
+  gl_code        VARCHAR2(4)    NOT NULL,
+  debit          NUMBER(17,0)   NOT NULL,
+  credit         NUMBER(17,0)   NOT NULL,
+  CONSTRAINT pk_gl_daily PRIMARY KEY (business_date, gl_code),
+  CONSTRAINT fk_gl_daily_account FOREIGN KEY (gl_code) REFERENCES gl_account (gl_code)
+);
+
+-- 月末締め（月末残高と月次の集計。照合で NG があれば EXCEPTION）
+CREATE TABLE month_close (
+  close_month       VARCHAR2(7)    NOT NULL,
+  month_end         DATE           NOT NULL,
+  total_deposits    NUMBER(17,0)   NOT NULL,
+  total_loans       NUMBER(17,0)   NOT NULL,
+  account_count     NUMBER(10)     NOT NULL,
+  tx_count          NUMBER(10)     NOT NULL,
+  inflow_amount     NUMBER(17,0)   NOT NULL,
+  outflow_amount    NUMBER(17,0)   NOT NULL,
+  fee_income        NUMBER(17,0)   NOT NULL,
+  loan_interest     NUMBER(17,0)   NOT NULL,
+  interest_paid     NUMBER(17,0)   NOT NULL,
+  accrued_interest  NUMBER(17,0)   NOT NULL,
+  ng_checks         NUMBER(6)      NOT NULL,
+  status            VARCHAR2(10)   NOT NULL,
+  closed_by         VARCHAR2(30)   NOT NULL,
+  closed_at         TIMESTAMP      NOT NULL,
+  CONSTRAINT pk_month_close PRIMARY KEY (close_month),
+  CONSTRAINT ck_month_close_status CHECK (status IN ('CLOSED', 'EXCEPTION'))
+);
+
+-- 帳票出力（CSV。同じ帳票・同じ日付は作り直すと置き換える）
+CREATE TABLE report_output (
+  report_id      NUMBER(19)          GENERATED BY DEFAULT AS IDENTITY,
+  report_type    VARCHAR2(20)        NOT NULL,
+  business_date  DATE                NOT NULL,
+  title          VARCHAR2(100 CHAR)  NOT NULL,
+  file_name      VARCHAR2(100)       NOT NULL,
+  row_count      NUMBER(10)          NOT NULL,
+  content        CLOB                NOT NULL,
+  created_by     VARCHAR2(30)        NOT NULL,
+  created_at     TIMESTAMP           NOT NULL,
+  CONSTRAINT pk_report_output PRIMARY KEY (report_id),
+  CONSTRAINT uq_report_output UNIQUE (report_type, business_date)
+);
+
+COMMENT ON TABLE batch_daily_summary IS '日次取引集計';
+COMMENT ON TABLE deposit_interest_accrual IS '預金利息の日次計上';
+COMMENT ON TABLE fee_summary IS '手数料の計算・照合';
+COMMENT ON TABLE batch_check IS 'バッチの照合結果';
+COMMENT ON TABLE gl_account IS '勘定科目';
+COMMENT ON TABLE gl_daily IS '総勘定元帳の日計';
+COMMENT ON TABLE month_close IS '月末締め';
+COMMENT ON TABLE report_output IS '帳票出力';
+
+COMMIT;

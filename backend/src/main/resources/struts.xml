@@ -332,6 +332,29 @@
       <interceptor-ref name="apiWriteStack"><param name="apiGuardWrite.roles">TELLER,SUPERVISOR</param></interceptor-ref>
     </action>
 
+    <!-- ===== Bank batch (catalog / rerun / daily results / month-end / report outputs / balance certificate) ===== -->
+    <action name="batch-catalog" class="com.example.bank.action.BatchAction" method="catalog">
+      <interceptor-ref name="apiReadStack"><param name="apiGuardRead.roles">SUPERVISOR</param></interceptor-ref>
+    </action>
+    <action name="batch-rerun" class="com.example.bank.action.BatchAction" method="rerun">
+      <interceptor-ref name="apiWriteStack"><param name="apiGuardWrite.roles">SUPERVISOR</param></interceptor-ref>
+    </action>
+    <action name="batch-daily" class="com.example.bank.action.BatchAction" method="daily">
+      <interceptor-ref name="apiReadStack"><param name="apiGuardRead.roles">SUPERVISOR</param></interceptor-ref>
+    </action>
+    <action name="month-closes" class="com.example.bank.action.BatchAction" method="monthCloses">
+      <interceptor-ref name="apiReadStack"><param name="apiGuardRead.roles">SUPERVISOR</param></interceptor-ref>
+    </action>
+    <action name="report-outputs" class="com.example.bank.action.BatchAction" method="reports">
+      <interceptor-ref name="apiReadStack"><param name="apiGuardRead.roles">SUPERVISOR</param></interceptor-ref>
+    </action>
+    <action name="report-output" class="com.example.bank.action.BatchAction" method="report">
+      <interceptor-ref name="apiReadStack"><param name="apiGuardRead.roles">SUPERVISOR</param><param name="apiGuardRead.audit">true</param></interceptor-ref>
+    </action>
+    <action name="balance-certificate" class="com.example.bank.action.BatchAction" method="certificate">
+      <interceptor-ref name="apiReadStack"><param name="apiGuardRead.audit">true</param></interceptor-ref>
+    </action>
+
     <!-- ===== Loan management (provisions / simulation / collateral revaluation / rescheduling) ===== -->
     <action name="loan-simulate" class="com.example.bank.action.LoanManagementAction" method="simulate"/>
     <action name="loan-management" class="com.example.bank.action.LoanManagementAction" method="management">

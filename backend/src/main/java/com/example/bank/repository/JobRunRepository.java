@@ -88,6 +88,21 @@ public class JobRunRepository {
         }
     }
 
+    /**
+     * 失敗したジョブの実行記録を消す（再実行のため。成功・実行中の記録は消さない）。
+     *
+     * @return 削除した件数（0 なら再実行できない）
+     * @throws SQLException DB アクセスに失敗した場合
+     */
+    public int deleteFailed(Connection c, String jobName, LocalDate runDate) throws SQLException {
+        try (PreparedStatement ps = c.prepareStatement(
+                "DELETE FROM job_run WHERE job_name = ? AND run_date = ? AND outcome = 'FAILURE'")) {
+            ps.setString(1, jobName);
+            ps.setDate(2, java.sql.Date.valueOf(runDate));
+            return ps.executeUpdate();
+        }
+    }
+
     /** 古い冪等キーを削除する。 */
     public int deleteRequestsBefore(Connection c, LocalDateTime cutoff) throws SQLException {
         // 冪等キーの保存期間を過ぎた行を消して表の肥大化を防ぐ（保存期間より後の再送は新しい要求として扱われる）

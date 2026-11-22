@@ -83,3 +83,6 @@ export const IconTarget = (p: IconProps) => (
 export const IconReport = (p: IconProps) => (
   <Svg {...p}><path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z" /><path d="M14 3v6h6" /><path d="M8 13h8" /><path d="M8 17h5" /></Svg>
 );
+export const IconLayers = (p: IconProps) => (
+  <Svg {...p}><path d="m12 3 9 5-9 5-9-5z" /><path d="m3 13 9 5 9-5" /></Svg>
+);

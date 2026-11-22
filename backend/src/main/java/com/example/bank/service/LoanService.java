@@ -354,8 +354,10 @@ public class LoanService {
                 int day = num(loan.get("paymentDay")).intValue();
                 LocalDate maturity = null;
                 // 返済予定表を全回分作ってから入金する（予定表と貸付残高が同じトランザクションで確定する）
+                // 休日は期間分を 1 回で読み込む（回数分 HOLIDAY 表を照会しない）
+                BusinessCalendar.Holidays holidays = BusinessCalendar.Holidays.load(c, today, today.plusMonths(term + 1));
                 for (LoanMath.Installment i : LoanMath.schedule(principal, rate, term, (String) loan.get("repaymentMethod"))) {
-                    LocalDate due = dueDate(c, today, i.no, day);
+                    LocalDate due = dueDate(holidays, today, i.no, day);
                     maturity = due;
                     execute(c, "INSERT INTO loan_schedule (loan_id, installment_no, due_date, principal_due, interest_due) "
                             + "VALUES (?, ?, ?, ?, ?)", loanId, i.no, due, i.principal, i.interest);
@@ -376,10 +378,18 @@ public class LoanService {
 
     /** k 回目の約定返済日（毎月の返済日、休業日は翌営業日）。 */
     static LocalDate dueDate(Connection c, LocalDate start, int k, int paymentDay) throws SQLException {
+        return BusinessCalendar.onOrAfter(c, nominalDueDate(start, k, paymentDay));
+    }
+
+    /** k 回目の約定返済日（休日をまとめて読み込んだカレンダーで判定。予定表を一度に作るとき用）。 */
+    static LocalDate dueDate(BusinessCalendar.Holidays holidays, LocalDate start, int k, int paymentDay) throws SQLException {
+        return holidays.onOrAfter(nominalDueDate(start, k, paymentDay));
+    }
+
+    // 休日調整前の返済日。月の日数より大きい返済日は月末に寄せる（現状は契約時に 28 日までに制限している）
+    private static LocalDate nominalDueDate(LocalDate start, int k, int paymentDay) {
         LocalDate month = start.plusMonths(k);
-        // 月の日数より大きい返済日は月末に寄せる（現状は契約時に 28 日までに制限している）
-        LocalDate d = month.withDayOfMonth(Math.min(paymentDay, month.lengthOfMonth()));
-        return BusinessCalendar.onOrAfter(c, d);
+        return month.withDayOfMonth(Math.min(paymentDay, month.lengthOfMonth()));
     }
 
     // ===================== repayment =====================

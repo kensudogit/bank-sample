@@ -2,6 +2,7 @@ package com.example.bank.service;
 
 import com.example.bank.domain.BankException;
 import com.example.bank.domain.ErrorCode;
+import com.example.bank.support.BusinessCalendar;
 import com.example.bank.support.DataSources;
 import com.example.bank.support.Transactions;
 
@@ -244,10 +245,12 @@ public class LoanManagementService {
         int day = paymentDay != null ? paymentDay : Math.min(today.getDayOfMonth(), 28);
         return Transactions.readOnly(dataSource.get(), c -> {
             List<Map<String, Object>> rows = new ArrayList<>();
+            // 休日は期間分を 1 回で読み込む（420 回なら 420 回の照会を 1 回に）
+            BusinessCalendar.Holidays holidays = BusinessCalendar.Holidays.load(c, today, today.plusMonths(months + 1));
             for (LoanMath.Installment i : LoanMath.schedule(principal, rate, months, method)) {
                 Map<String, Object> r = new LinkedHashMap<>();
                 r.put("no", i.no);
-                r.put("dueDate", LoanService.dueDate(c, today, i.no, day).toString());
+                r.put("dueDate", LoanService.dueDate(holidays, today, i.no, day).toString());
                 r.put("principal", i.principal);
                 r.put("interest", i.interest);
                 r.put("total", i.total());
@@ -382,10 +385,11 @@ public class LoanManagementService {
                     + "AND status IN ('SCHEDULED', 'PARTIAL', 'OVERDUE')", loanId);
             int day = num(loan.get("paymentDay")).intValue();
             List<LoanMath.Installment> plan = LoanMath.schedule(outstanding, rate, newMonths, method);
+            BusinessCalendar.Holidays holidays = BusinessCalendar.Holidays.load(c, today, today.plusMonths(newMonths + 1));
             LocalDate maturity = null;
             BigDecimal newPayment = null;
             for (LoanMath.Installment i : plan) {
-                LocalDate due = LoanService.dueDate(c, today, i.no, day);
+                LocalDate due = LoanService.dueDate(holidays, today, i.no, day);
                 maturity = due;
                 BigDecimal interest = i.no == 1 ? i.interest.add(arrearsInterest) : i.interest;
                 if (i.no == 2 || (newPayment == null && plan.size() == 1)) newPayment = i.total();

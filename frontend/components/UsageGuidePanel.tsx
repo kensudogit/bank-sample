@@ -185,12 +185,24 @@ const steps = [
     ],
   },
   {
-    title: "12. 停止・初期化・環境メモ",
+    title: "12. 銀行バッチ（役席）",
+    body: "ADMIN メニューの「銀行バッチ」。毎日 01:00 以降に前日分を処理し、照合で NG が出たジョブは失敗として残ります。",
+    items: [
+      "業務一覧：日次取引集計・残高照合・預金利息計算・融資返済・延滞判定・手数料計算・為替照合・会計仕訳集計・月末締め・帳票出力と、担当ジョブの直近の結果",
+      "失敗したジョブは原因を直してから「再実行」（成功したジョブは再実行できない）。「未実行のジョブを今すぐ実行」で当日分を前倒し",
+      "日次の結果：照合（OK / WARN / NG）、取引集計、総勘定元帳の日計（借方 = 貸方）、利息の日次計上と未払利息、手数料の照合",
+      "月末締め：毎月 1 日に前月を確定（照合 NG が残っていれば例外）。帳票出力：取引明細表・日計表・月末残高一覧・月次集計表を CSV でダウンロード",
+      "残高証明書：各口座の画面の「残高証明書」から、証明日を指定して印刷（お客さまも本人の口座で利用可）",
+    ],
+  },
+  {
+    title: "13. 停止・初期化・環境メモ",
     body: "データを最初の状態に戻すときはボリュームごと削除します。",
     items: [
       "停止：docker compose down",
       "初期化：docker compose down -v（次回起動時に db/init の SQL で再作成）",
       "既存の DB に情報系の表を追加：docker compose exec oracle bash -c \"sqlplus -s / as sysdba @/container-entrypoint-initdb.d/08_information.sql\"",
+      "既存の DB を最新に：同じ要領で 09_loan_management.sql（融資管理）・10_dw_performance.sql（情報系の索引）・11_batch_operations.sql（銀行バッチ）も 1 回ずつ実行",
       "Windows でビルドに失敗するとき：COMPOSE_BAKE=false DOCKER_CONTEXT=desktop-linux を付ける",
       "API の稼働確認：http://localhost:9080/bank/api/health（ログイン不要）",
     ],
