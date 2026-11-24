@@ -11,17 +11,48 @@ export interface IntegrationStatus {
   core: "UP" | "DOWN";
 }
 
-/** 連携の実行履歴 1 件 */
+/** 連携の実行履歴 1 件（勘定系の Oracle に保存。再起動しても消えない） */
 export interface IntegrationRun {
   runId: string;
   kind: "ZENGIN_INCOMING" | "BILLING_IMPORT" | "FX_RATES";
   startedAt: string;
   durationMs: number;
-  outcome: "SUCCESS" | "PARTIAL" | "FAILURE";
+  status?: "PROCESSING" | "COMPLETED" | "FAILED";
+  outcome: "SUCCESS" | "PARTIAL" | "FAILURE" | "PROCESSING";
   consumer: string;
   operator: string | null;
+  approver?: string | null;
   requestId: string;
   summary: string;
+  attempts?: number;
+}
+
+/** 手動送信の依頼（二者承認） */
+export interface IntegrationRequest {
+  requestId: string;
+  kind: "ZENGIN_INCOMING" | "BILLING_IMPORT" | "FX_RATES";
+  contentType: string;
+  payloadSha256: string;
+  payloadBytes: number;
+  fileName: string | null;
+  commentText: string | null;
+  status: "PENDING" | "APPROVED" | "REJECTED" | "SENT" | "FAILED";
+  maker: string;
+  createdAt: string;
+  approver: string | null;
+  decidedAt: string | null;
+  rejectReason: string | null;
+  attempts: number;
+  runId: string | null;
+  resultStatus: number | null;
+}
+
+/** 承認・再送の結果（送信した場合は連携の応答） */
+export interface DispatchResult {
+  request: IntegrationRequest | null;
+  httpStatus: number;
+  result: any;
+  kind: SubmitKind;
 }
 
 /** 全銀データの取込結果 */
@@ -42,7 +73,7 @@ export type SubmitKind = "zengin" | "billing" | "fx";
 const BASE = "/api/integration";
 
 /** problem+json を ApiError に変換する（errors は行番号付きで項目エラーとして表示する） */
-async function toError(res: Response): Promise<ApiError> {
+export async function toError(res: Response): Promise<ApiError> {
   const p = (await res.json().catch(() => null)) as
     | { title?: string; detail?: string; type?: string; errors?: { line?: number; message: string }[]; message?: string }
     | null;
@@ -63,26 +94,76 @@ async function call<T>(path: string, init?: RequestInit): Promise<T> {
   return (await res.json()) as T;
 }
 
+// セッションに結び付いた CSRF トークン（更新要求に X-CSRF-Token で付ける）。拒否されたら 1 回だけ取り直す
+let csrf: string | null = null;
+async function csrfToken(refresh = false): Promise<string> {
+  if (!csrf || refresh) csrf = (await call<{ token: string }>("/csrf")).token;
+  return csrf;
+}
+/** テスト用：CSRF トークンのキャッシュを消す */
+export function resetCsrf(): void {
+  csrf = null;
+}
+
+async function write<T>(path: string, init: RequestInit): Promise<T> {
+  const send = async (refresh: boolean) =>
+    call<T>(path, {
+      ...init, method: "POST",
+      headers: { ...(init.headers as Record<string, string>), "X-Requested-With": "XMLHttpRequest", "X-CSRF-Token": await csrfToken(refresh) },
+    });
+  try {
+    return await send(false);
+  } catch (e) {
+    if (e instanceof ApiError && e.status === 403 && /再読み込み/.test(e.message)) return send(true);
+    throw e;
+  }
+}
+
 export const integrationApi = {
   status: () => call<IntegrationStatus>("/status"),
   runs: () => call<IntegrationRun[]>("/runs"),
-  /** データを送信する。送信後は残高・明細なども変わるため、画面のキャッシュをすべて古い扱いにする */
-  submit: async <T = unknown>(kind: SubmitKind, body: BodyInit, contentType: string): Promise<T> => {
+  requests: () => call<IntegrationRequest[]>("/requests"),
+  /** 承認依頼を作成する（この時点では送信しない） */
+  createRequest: async (kind: SubmitKind, body: BodyInit, contentType: string, fileName?: string | null, comment?: string | null) => {
     try {
-      return await call<T>(`/${kind}`, {
-        method: "POST",
-        body,
-        headers: { "Content-Type": contentType, "X-Requested-With": "XMLHttpRequest" },
-      });
+      const headers: Record<string, string> = { "Content-Type": contentType };
+      if (fileName) headers["X-File-Name"] = encodeURIComponent(fileName);
+      if (comment) headers["X-Comment"] = encodeURIComponent(comment);
+      return await write<IntegrationRequest>(`/requests?kind=${kind}`, { body, headers });
+    } finally {
+      invalidate("integration-requests");
+    }
+  },
+  /** 承認して送信する（作成者以外の役席）。送信後は残高・明細なども変わるため、画面のキャッシュをすべて古い扱いにする */
+  approve: async (id: string) => {
+    try {
+      return await write<DispatchResult>(`/requests/${encodeURIComponent(id)}/approve`, {});
     } finally {
       invalidate("*");
+    }
+  },
+  /** 失敗した送信を再送する（同じ依頼 ID を冪等キーにするので二重には処理されない） */
+  retry: async (id: string) => {
+    try {
+      return await write<DispatchResult>(`/requests/${encodeURIComponent(id)}/retry`, {});
+    } finally {
+      invalidate("*");
+    }
+  },
+  reject: async (id: string, reason: string) => {
+    try {
+      return await write<IntegrationRequest>(`/requests/${encodeURIComponent(id)}/reject`, {
+        body: JSON.stringify({ reason }), headers: { "Content-Type": "application/json" },
+      });
+    } finally {
+      invalidate("integration-requests");
     }
   },
 };
 
 export const useIntegrationStatus = () => useQuery("integration-status", integrationApi.status);
 export const useIntegrationRuns = () => useQuery("integration-runs", integrationApi.runs);
-
+export const useIntegrationRequests = () => useQuery("integration-requests", integrationApi.requests);
 // ---- サンプルデータ（画面の「サンプルを入れる」用。架空のデータ） ----
 
 const padRight = (s: string, n: number) => (s + " ".repeat(n)).slice(0, n);

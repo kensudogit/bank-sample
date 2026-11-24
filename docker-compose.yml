@@ -1,13 +1,22 @@
 name: bank-sample
 
-# High availability layout:
+# Layout (networks keep each tier reachable only from the tier in front of it):
 #   browser -> lb:3000 -> frontend x2 -> kong:8000 (API gateway) -> liberty x2 -> oracle
-#   partners (Zengin / billing agencies / FX provider) -> kong 127.0.0.1:8088 /integration/v1 (API key + ACL)
-#     -> mule:8081 (MuleSoft Process API; the mule-compat container locally) -> lb:9080 -> liberty x2
-#   lb:9080 stays available for direct API access and for MuleSoft (internal; no double proxy through Kong)
-# Any single frontend / liberty instance can fail or restart without stopping the service:
-# sessions are stored in Oracle, batch jobs run once per day via the JOB_RUN table, and the load balancer
-# skips unhealthy instances. Scale with LIBERTY_REPLICAS / FRONTEND_REPLICAS in .env.
+#   partners -> kong 127.0.0.1:8088 /oauth2/token (auth: OAuth 2.0 client credentials)
+#            -> kong /integration/v1 (Bearer JWT: signature, iss, aud, exp, roles + ACL)
+#            -> mule:8443 (mTLS; MuleSoft Process API, the mule-compat container locally) -> kong -> liberty x2
+#   kong <-> redis (rate-limit counters shared by every Kong node)
+# Liberty accepts only requests that carry the gateway secret Kong adds (BANK_GATEWAY_SECRET); MuleSoft accepts only
+# Kong's client certificate. Neither has a host port. Monitoring (Prometheus / Grafana / Jaeger / OTel Collector) starts
+# with `docker compose --profile observability up -d`.
+# Secrets: integration/scripts/gen-secrets.sh (appends to .env, which is not committed).
+
+networks:
+  edge: {}          # lb, frontend, kong
+  integration: {}   # kong, mule, auth
+  core: {}          # kong, liberty, oracle
+  cache: {}         # kong, redis
+  observability: {} # metrics / traces
 
 services:
   # Oracle Database 23ai Free (PDB: FREEPDB1, app schema: BANK)
@@ -24,6 +33,7 @@ services:
     volumes:
       - ./db/init:/container-entrypoint-initdb.d:ro
       - oracle-data:/opt/oracle/oradata
+    networks: [core]
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "healthcheck.sh"]
@@ -32,7 +42,8 @@ services:
       retries: 60
       start_period: 60s
 
-  # IBM WebSphere Application Server Liberty (Java 8) running the Struts 2 API WAR (2 instances)
+  # IBM WebSphere Application Server Liberty (Java 8) running the Struts 2 API WAR (2 instances).
+  # No host port: only Kong (with the gateway secret) can call the API.
   liberty:
     build:
       context: ./backend
@@ -43,40 +54,48 @@ services:
       BANK_DB_URL: jdbc:oracle:thin:@//oracle:1521/FREEPDB1
       BANK_DB_USER: ${BANK_DB_USER:-BANK}
       BANK_DB_PASSWORD: ${BANK_DB_PASSWORD:?set BANK_DB_PASSWORD in .env}
+      BANK_GATEWAY_SECRET: ${BANK_GATEWAY_SECRET:?run integration/scripts/gen-secrets.sh}
       TZ: Asia/Tokyo
-      # Nightly batch (dormancy, maturities, loans, direct debit, ledger check, ...) from 01:00.
+      # Nightly batch (dormancy, maturities, loans, direct debit, ledger check, audit anchor / retention, ...) from 01:00.
       # Safe with several instances: each job runs once per day (JOB_RUN primary key)
       BANK_JOBS_ENABLED: ${BANK_JOBS_ENABLED:-true}
     depends_on:
       oracle:
         condition: service_healthy
+    networks: [core]
     restart: unless-stopped
     healthcheck:
-      # readiness: 503 while the database is unreachable
+      # readiness: 503 while the database is unreachable (health checks do not need the gateway secret)
       test: ["CMD-SHELL", "curl -fsS http://localhost:9080/bank/api/health || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 30
       start_period: 40s
 
-  # Next.js (React / TypeScript) frontend; proxies /api/bank/* to the API through the load balancer (2 instances)
+  # Next.js (React / TypeScript) frontend; proxies /api/bank/* to Kong (2 instances)
   frontend:
     build:
       context: ./frontend
       args:
-        # Rewrites /api/bank/* to the Kong gateway (Host: kong), which balances across the Liberty instances
         BANK_API_ORIGIN: http://kong:8000
     image: bank-sample-frontend
     deploy:
       replicas: ${FRONTEND_REPLICAS:-2}
     environment:
-      # Integration console (/integration): server-side calls to Kong with the bank-ops key (never sent to the browser)
       BANK_API_INTERNAL: http://kong:8000/bank/api
+      # Integration console (/integration): server-side only. OAuth client of Kong (bank-ops), operator signature, CSRF key
       INTEGRATION_GATEWAY_URL: http://kong:8000/integration/v1
-      INTEGRATION_OPS_KEY: ${KONG_KEY_OPS:?set KONG_KEY_OPS in .env}
+      INTEGRATION_TOKEN_URL: http://kong:8000/oauth2/token
+      INTEGRATION_CLIENT_ID: bank-ops
+      INTEGRATION_CLIENT_SECRET: ${OAUTH_SECRET_OPS:?run integration/scripts/gen-secrets.sh}
+      OPERATOR_TOKEN_SECRET: ${OPERATOR_TOKEN_SECRET:?run integration/scripts/gen-secrets.sh}
+      CONSOLE_CSRF_SECRET: ${CONSOLE_CSRF_SECRET:?run integration/scripts/gen-secrets.sh}
+      # Origins the browser may send state-changing requests from (exact match)
+      PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:-http://localhost:3000,http://127.0.0.1:3000}
     depends_on:
       kong:
         condition: service_healthy
+    networks: [edge]
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:3000/login || exit 1"]
@@ -85,8 +104,35 @@ services:
       retries: 10
       start_period: 20s
 
-  # Kong Gateway (OSS, DB-less). Declarative config: integration/kong/kong.yml.tmpl (API keys from .env at start-up).
-  # Targets / internal host names default to this compose layout (KONG_LIBERTY_TARGETS / KONG_INTERNAL_HOSTS override them)
+  # OAuth 2.0 token server (client credentials, RS256). Reached through Kong (/oauth2/token).
+  # Production: Microsoft Entra ID (set AUTH_MODE=entra for Kong; see integration/docs/security-design.md)
+  auth:
+    build:
+      context: ./integration/auth-server
+    image: bank-sample-auth
+    environment:
+      AUTH_ISSUER: https://auth.bank-sample.local
+      AUTH_AUDIENCE: api://bank-integration
+      AUTH_SIGNING_KEY: ${AUTH_SIGNING_KEY:?run integration/scripts/gen-secrets.sh}
+      AUTH_CLIENTS: ${AUTH_CLIENTS:?run integration/scripts/gen-secrets.sh}
+    networks: [integration, observability]
+    restart: unless-stopped
+
+  # Rate-limit counters shared by every Kong node (policy: redis). Counters only: no persistence
+  redis:
+    image: redis:7.4.1-alpine
+    command: ["sh", "-c", "exec redis-server --requirepass \"$$REDIS_PASSWORD\" --save '' --appendonly no --maxmemory 64mb --maxmemory-policy volatile-ttl"]
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?run integration/scripts/gen-secrets.sh}
+    networks: [cache]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a \"$$REDIS_PASSWORD\" --no-auth-warning ping | grep -q PONG"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  # Kong Gateway (OSS, DB-less). Declarative config: integration/kong/kong.yml.tmpl (values from .env at start-up)
   kong:
     build:
       context: ./integration/kong
@@ -105,16 +151,33 @@ services:
       KONG_REAL_IP_HEADER: X-Forwarded-For
       KONG_REAL_IP_RECURSIVE: "on"
       KONG_NGINX_WORKER_PROCESSES: "2"
-      KONG_KEY_ZENGIN: ${KONG_KEY_ZENGIN:?set KONG_KEY_ZENGIN in .env}
-      KONG_KEY_BILLING: ${KONG_KEY_BILLING:?set KONG_KEY_BILLING in .env}
-      KONG_KEY_FX: ${KONG_KEY_FX:?set KONG_KEY_FX in .env}
-      KONG_KEY_OPS: ${KONG_KEY_OPS:?set KONG_KEY_OPS in .env}
+      KONG_TRACING_INSTRUMENTATIONS: ${KONG_TRACING_INSTRUMENTATIONS:-off}
+      KONG_TRACING_SAMPLING_RATE: "1.0"
+      KONG_GATEWAY_SECRET: ${BANK_GATEWAY_SECRET:?run integration/scripts/gen-secrets.sh}
+      AUTH_MODE: ${AUTH_MODE:-local}
+      KONG_TOKEN_PUBLIC_KEY: ${KONG_TOKEN_PUBLIC_KEY:?run integration/scripts/gen-secrets.sh}
+      KONG_TOKEN_AUDIENCE: ${KONG_TOKEN_AUDIENCE:-api://bank-integration}
+      ENTRA_TENANT_ID: ${ENTRA_TENANT_ID:-}
+      KONG_CLIENT_ID_ZENGIN: ${KONG_CLIENT_ID_ZENGIN:-}
+      KONG_CLIENT_ID_BILLING: ${KONG_CLIENT_ID_BILLING:-}
+      KONG_CLIENT_ID_FX: ${KONG_CLIENT_ID_FX:-}
+      KONG_CLIENT_ID_OPS: ${KONG_CLIENT_ID_OPS:-}
+      KONG_MTLS_CA_CERT: ${MTLS_CA_CERT:?run integration/scripts/gen-secrets.sh}
+      KONG_MTLS_CLIENT_CERT: ${KONG_MTLS_CLIENT_CERT:?run integration/scripts/gen-secrets.sh}
+      KONG_MTLS_CLIENT_KEY: ${KONG_MTLS_CLIENT_KEY:?run integration/scripts/gen-secrets.sh}
+      KONG_REDIS_HOST: redis
+      KONG_REDIS_PASSWORD: ${REDIS_PASSWORD:?run integration/scripts/gen-secrets.sh}
+      # Set to http://otel-collector:4318/v1/traces (and KONG_TRACING_INSTRUMENTATIONS=all) with the observability profile
+      KONG_OTEL_ENDPOINT: ${KONG_OTEL_ENDPOINT:-}
     ports:
-      # Partner entry point (/integration/v1/*). The /bank/api routes only answer to Host: kong (frontend)
+      # Partner entry point (/oauth2/token, /integration/v1/*). The /bank/api routes only answer to Host: kong
       - "127.0.0.1:${KONG_HOST_PORT:-8088}:8000"
     depends_on:
       liberty:
         condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks: [edge, integration, core, cache, observability]
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "kong", "health"]
@@ -124,41 +187,94 @@ services:
       start_period: 15s
 
   # MuleSoft integration (Process API). Locally the mule-compat container serves the same contract as the Mule 4 app in
-  # integration/mulesoft/bank-integration; replace this service with a Mule runtime image to run the real app.
+  # integration/mulesoft/bank-integration. 8443: mTLS (Kong only). 8081: /live and /metrics only
   mule:
     build:
       context: ./integration/mule-compat
     image: bank-sample-mule-compat
     environment:
-      CORE_BASE_URL: http://lb:9080/bank/api
+      # Calls to the core banking API go through Kong (the only way into Liberty)
+      CORE_BASE_URL: http://kong:8000/bank/api
       MULE_CORE_USER: svc-mule
       MULE_CORE_PASSWORD: ${MULE_CORE_PASSWORD:?set MULE_CORE_PASSWORD in .env}
       OUR_BANK_CODE: "9999"
+      MULE_TLS_CERT: ${MULE_TLS_CERT:?run integration/scripts/gen-secrets.sh}
+      MULE_TLS_KEY: ${MULE_TLS_KEY:?run integration/scripts/gen-secrets.sh}
+      MTLS_CA_CERT: ${MTLS_CA_CERT:?run integration/scripts/gen-secrets.sh}
+      MTLS_ALLOWED_CLIENTS: kong-gateway
+      OPERATOR_TOKEN_SECRET: ${OPERATOR_TOKEN_SECRET:?run integration/scripts/gen-secrets.sh}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${MULE_OTEL_ENDPOINT:-}
       TZ: Asia/Tokyo
     depends_on:
-      liberty:
+      kong:
         condition: service_healthy
+    networks: [integration, observability]
     restart: unless-stopped
 
-  # Load balancer (nginx): 127.0.0.1:3000 for browsers, 127.0.0.1:9080 for the API
+  # Load balancer (nginx): 127.0.0.1:3000 for browsers (the API is reached only through the frontend and Kong)
   lb:
     image: nginx:1.28-alpine
     volumes:
       - ./lb/nginx.conf:/etc/nginx/nginx.conf:ro
     ports:
       - "127.0.0.1:${FRONTEND_HOST_PORT:-3000}:3000"
-      - "127.0.0.1:${LIBERTY_HOST_PORT:-9080}:9080"
     depends_on:
-      liberty:
-        condition: service_healthy
       frontend:
         condition: service_healthy
+    networks: [edge]
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:3000/lb-health || exit 1"]
       interval: 10s
       timeout: 3s
       retries: 5
+
+  # ---------------- Monitoring (profile: observability) ----------------
+  otel-collector:
+    profiles: [observability]
+    image: otel/opentelemetry-collector-contrib:0.115.1
+    command: ["--config=/etc/otelcol/config.yaml"]
+    volumes:
+      - ./observability/otel-collector.yaml:/etc/otelcol/config.yaml:ro
+    networks: [observability]
+    restart: unless-stopped
+
+  jaeger:
+    profiles: [observability]
+    image: jaegertracing/all-in-one:1.64.0
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      - "127.0.0.1:${JAEGER_HOST_PORT:-16686}:16686"
+    networks: [observability]
+    restart: unless-stopped
+
+  prometheus:
+    profiles: [observability]
+    image: prom/prometheus:v3.0.1
+    command: ["--config.file=/etc/prometheus/prometheus.yml", "--storage.tsdb.retention.time=7d"]
+    volumes:
+      - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./observability/alerts.yml:/etc/prometheus/alerts.yml:ro
+    ports:
+      - "127.0.0.1:${PROMETHEUS_HOST_PORT:-9090}:9090"
+    networks: [observability]
+    restart: unless-stopped
+
+  grafana:
+    profiles: [observability]
+    image: grafana/grafana:11.4.0
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-change_me_grafana}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+    volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "127.0.0.1:${GRAFANA_HOST_PORT:-3001}:3000"
+    networks: [observability]
+    restart: unless-stopped
 
 volumes:
   oracle-data:

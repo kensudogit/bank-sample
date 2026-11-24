@@ -1,10 +1,14 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-  共通設定：設定ファイルの読込、HTTP リスナー、勘定系（Liberty）への HTTP 要求設定、Object Store、全体のエラー処理。
-  エラーはすべて RFC 9457（application/problem+json）で返し、Kong から渡された X-Request-ID をログと応答に残す。
+  共通設定：設定ファイルの読込、HTTPS（mTLS）リスナー、勘定系（Kong 経由）への HTTP 要求設定、Object Store、全体のエラー処理。
+  - 業務 API は mTLS：Kong のクライアント証明書（社内 CA が発行したもの）だけを受け付ける（ゲートウェイ迂回の防止）
+  - 勘定系へは Kong の社内ルート（Host: kong）を通る（Liberty は Kong が付ける共有シークレットのない要求を拒否する）
+  - エラーはすべて RFC 9457（application/problem+json）で返し、Kong から渡された X-Request-ID をログと応答に残す
+  - 実行の結果は勘定系に記録する：入力エラーは「完了」（同じ再送には同じ 422）、勘定系の障害は「失敗」（再処理できる）
 -->
 <mule xmlns="http://www.mulesoft.org/schema/mule/core"
       xmlns:http="http://www.mulesoft.org/schema/mule/http"
+      xmlns:tls="http://www.mulesoft.org/schema/mule/tls"
       xmlns:os="http://www.mulesoft.org/schema/mule/os"
       xmlns:ee="http://www.mulesoft.org/schema/mule/ee/core"
       xmlns:doc="http://www.mulesoft.org/schema/mule/documentation"
@@ -12,6 +16,7 @@
       xsi:schemaLocation="
         http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
         http://www.mulesoft.org/schema/mule/http http://www.mulesoft.org/schema/mule/http/current/mule-http.xsd
+        http://www.mulesoft.org/schema/mule/tls http://www.mulesoft.org/schema/mule/tls/current/mule-tls.xsd
         http://www.mulesoft.org/schema/mule/os http://www.mulesoft.org/schema/mule/os/current/mule-os.xsd
         http://www.mulesoft.org/schema/mule/ee/core http://www.mulesoft.org/schema/mule/ee/core/current/mule-ee.xsd">
 
@@ -19,57 +24,97 @@
   <global-property name="env" value="local" doc:name="既定の環境"/>
   <configuration-properties file="config/config-${env}.yaml" doc:name="設定ファイル"/>
 
-  <!-- 外部連携 API の受口（社内ネットワークのみ。外部からは Kong 経由） -->
-  <http:listener-config name="Integration_Listener" doc:name="外部連携 API の受口">
+  <!-- 外部連携 API の受口（mTLS。Kong 以外は TLS の握手で拒否される） -->
+  <tls:context name="Integration_TLS" doc:name="mTLS">
+    <tls:trust-store path="${tls.truststore.path}" password="${tls.truststore.password}" type="pkcs12"/>
+    <tls:key-store path="${tls.keystore.path}" keyPassword="${tls.keystore.password}" password="${tls.keystore.password}" type="pkcs12"/>
+  </tls:context>
+  <http:listener-config name="Integration_Listener" doc:name="外部連携 API の受口（HTTPS・クライアント証明書必須）">
+    <http:listener-connection host="${http.listener.host}" port="${http.listener.tlsPort}" protocol="HTTPS" tlsContext="Integration_TLS"/>
+  </http:listener-config>
+  <!-- 死活確認だけの平文の受口 -->
+  <http:listener-config name="Admin_Listener" doc:name="死活確認">
     <http:listener-connection host="${http.listener.host}" port="${http.listener.port}"/>
   </http:listener-config>
 
-  <!-- 勘定系 API（Liberty）への要求。応答の時間切れを設け、失敗をそのまま上位に返す（入金系は自動で再送しない） -->
-  <http:request-config name="Core_Banking_API" doc:name="勘定系 API" responseTimeout="${core.responseTimeout}">
+  <!-- 勘定系 API（Kong 経由）への要求。応答の時間切れを設け、失敗は core-post が判定する -->
+  <http:request-config name="Core_Banking_API" doc:name="勘定系 API（Kong 経由）" responseTimeout="${core.responseTimeout}">
     <http:request-connection host="${core.host}" port="${core.port}">
+      <reconnection><reconnect frequency="1000" count="2"/></reconnection>
       <http:client-socket-properties>
         <sockets:tcp-client-socket-properties xmlns:sockets="http://www.mulesoft.org/schema/mule/sockets" connectionTimeout="3000"/>
       </http:client-socket-properties>
     </http:request-connection>
     <http:default-headers>
+      <!-- Kong の社内ルートは Host: kong だけを受け付ける -->
+      <http:default-header key="Host" value="${core.hostHeader}"/>
       <!-- 勘定系の CSRF 対策（更新系は JSON ＋ X-Requested-With が必須） -->
       <http:default-header key="X-Requested-With" value="XMLHttpRequest"/>
       <http:default-header key="Accept" value="application/json"/>
     </http:default-headers>
   </http:request-config>
 
-  <!-- 勘定系のセッション Cookie（ログイン結果）と実行履歴の保存先。persistent=false：再起動で消えてよい情報 -->
+  <!-- 勘定系のセッション Cookie（ログイン結果）。実行履歴は勘定系（Oracle）に保存するので、ここには置かない -->
   <os:object-store name="Core_Session_Store" persistent="false" entryTtl="25" entryTtlUnit="MINUTES" doc:name="セッション"/>
-  <os:object-store name="Run_History_Store" persistent="false" maxEntries="${runs.keep}" doc:name="実行履歴"/>
 
-  <!-- 全フロー共通のエラー処理：業務エラー（検証 NG）は 422、勘定系の障害は 502、それ以外は 500 -->
+  <!-- 全フロー共通のエラー処理 -->
   <error-handler name="Problem_Error_Handler" doc:name="RFC 9457 で返す">
-    <on-error-propagate type="APP:INVALID_INPUT" doc:name="入力エラー">
-      <ee:transform doc:name="422 problem">
-        <ee:message>
-          <ee:set-payload resource="dw/problem.dwl"/>
-        </ee:message>
-        <ee:variables><ee:set-variable variableName="problemStatus"><![CDATA[422]]></ee:set-variable></ee:variables>
+    <!-- 完了済みの再送：業務処理をせず、保存した応答をそのまま返す（Idempotent-Replayed: true） -->
+    <on-error-continue type="APP:REPLAY" doc:name="再送の再現">
+      <set-variable variableName="httpStatus" value="#[vars.replayStatus as Number]"/>
+      <set-variable variableName="replayed" value="#[true]"/>
+      <set-payload value="#[vars.replayBody]" mimeType="application/json"/>
+    </on-error-continue>
+    <on-error-propagate type="APP:IN_PROGRESS" doc:name="処理中">
+      <ee:transform doc:name="409 problem">
+        <ee:message><ee:set-payload resource="dw/problem.dwl"/></ee:message>
+        <ee:variables><ee:set-variable variableName="problemStatus"><![CDATA[409]]></ee:set-variable></ee:variables>
       </ee:transform>
     </on-error-propagate>
-    <on-error-propagate type="HTTP:CONNECTIVITY, HTTP:TIMEOUT, HTTP:INTERNAL_SERVER_ERROR, HTTP:SERVICE_UNAVAILABLE, APP:CORE_UNAVAILABLE" doc:name="勘定系の障害">
+    <on-error-propagate type="APP:FORBIDDEN" doc:name="拒否">
+      <ee:transform doc:name="403 problem">
+        <ee:message><ee:set-payload resource="dw/problem.dwl"/></ee:message>
+        <ee:variables><ee:set-variable variableName="problemStatus"><![CDATA[403]]></ee:set-variable></ee:variables>
+      </ee:transform>
+    </on-error-propagate>
+    <on-error-propagate type="APP:INVALID_INPUT" doc:name="入力エラー">
+      <ee:transform doc:name="422 problem">
+        <ee:message><ee:set-payload resource="dw/problem.dwl"/></ee:message>
+        <ee:variables><ee:set-variable variableName="problemStatus"><![CDATA[422]]></ee:set-variable></ee:variables>
+      </ee:transform>
+      <flow-ref name="finish-run-on-error" doc:name="完了として記録（同じ再送には同じ 422）"/>
+    </on-error-propagate>
+    <on-error-propagate type="HTTP:CONNECTIVITY, HTTP:TIMEOUT, HTTP:INTERNAL_SERVER_ERROR, HTTP:SERVICE_UNAVAILABLE, APP:CORE_UNAVAILABLE, MULE:RETRY_EXHAUSTED" doc:name="勘定系の障害">
       <ee:transform doc:name="502 problem">
-        <ee:message>
-          <ee:set-payload resource="dw/problem.dwl"/>
-        </ee:message>
+        <ee:message><ee:set-payload resource="dw/problem.dwl"/></ee:message>
         <ee:variables><ee:set-variable variableName="problemStatus"><![CDATA[502]]></ee:set-variable></ee:variables>
       </ee:transform>
+      <flow-ref name="finish-run-on-error" doc:name="失敗として記録（再処理できる）"/>
     </on-error-propagate>
     <on-error-propagate type="ANY" doc:name="想定外">
       <logger level="ERROR" message="#[{ requestId: vars.requestId, error: error.errorType.identifier, detail: error.description }]"/>
       <ee:transform doc:name="500 problem">
-        <ee:message>
-          <ee:set-payload resource="dw/problem.dwl"/>
-        </ee:message>
+        <ee:message><ee:set-payload resource="dw/problem.dwl"/></ee:message>
         <ee:variables><ee:set-variable variableName="problemStatus"><![CDATA[500]]></ee:set-variable></ee:variables>
       </ee:transform>
+      <flow-ref name="finish-run-on-error"/>
     </on-error-propagate>
   </error-handler>
+
+  <!-- エラー時の実行の記録：5xx は FAILED（再処理できる）、それ以外は応答を保存して COMPLETED -->
+  <sub-flow name="finish-run-on-error">
+    <choice>
+      <when expression="#[vars.runId != null]">
+        <set-variable variableName="problemBody" value="#[write(payload, 'application/json')]"/>
+        <set-variable variableName="finishRequest" value="#[output application/java --- {
+          runId: vars.runId, status: if (vars.problemStatus &gt;= 500) 'FAILED' else 'COMPLETED', outcome: 'FAILURE',
+          summary: error.description default 'エラー', httpStatus: vars.problemStatus as String,
+          responseBody: if (vars.problemStatus &gt;= 500) null else vars.problemBody }]"/>
+        <flow-ref name="finish-run"/>
+        <set-payload value="#[vars.problemBody]" mimeType="application/problem+json"/>
+      </when>
+    </choice>
+  </sub-flow>
 
   <configuration defaultErrorHandler-ref="Problem_Error_Handler" doc:name="既定のエラー処理"/>
 </mule>

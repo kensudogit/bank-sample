@@ -4,6 +4,16 @@
          version="4.0">
   <display-name>bank-api</display-name>
 
+  <!-- ゲートウェイ迂回の防止：Kong が付ける共有シークレットのない要求は Struts に渡さない（Struts より先に実行する） -->
+  <filter>
+    <filter-name>gatewayGuard</filter-name>
+    <filter-class>com.example.bank.support.GatewayGuardFilter</filter-class>
+  </filter>
+  <filter-mapping>
+    <filter-name>gatewayGuard</filter-name>
+    <url-pattern>/api/*</url-pattern>
+  </filter-mapping>
+
   <filter>
     <filter-name>struts2</filter-name>
     <filter-class>org.apache.struts2.dispatcher.filter.StrutsPrepareAndExecuteFilter</filter-class>

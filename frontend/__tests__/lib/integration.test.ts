@@ -1,11 +1,13 @@
 // lib/integration.ts のテスト：problem+json を ApiError に変換すること、送信のヘッダー、キャッシュの無効化、サンプルの全銀データ。
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiError } from "@/lib/api";
-import { SAMPLE_BILLING, SAMPLE_FX, integrationApi, sampleZengin } from "@/lib/integration";
+import { SAMPLE_BILLING, SAMPLE_FX, integrationApi, resetCsrf, sampleZengin } from "@/lib/integration";
 import * as query from "@/lib/query";
 import { RawResponse, callsTo, mockApi } from "../../test/api";
 
 describe("integrationApi", () => {
+  beforeEach(() => resetCsrf());
+
   it("status・runs は /api/integration の JSON をそのまま返す", async () => {
     mockApi({ "/api/integration/status": new RawResponse(200, { status: "UP", runtime: "mule-compat", core: "UP" }) });
     await expect(integrationApi.status()).resolves.toEqual({ status: "UP", runtime: "mule-compat", core: "UP" });
@@ -13,12 +15,13 @@ describe("integrationApi", () => {
 
   it("problem+json を行番号付きの項目エラーを持つ ApiError にする", async () => {
     mockApi({
-      "/api/integration/zengin": new RawResponse(422, {
+      "/api/integration/csrf": new RawResponse(200, { token: "t1" }),
+      "/api/integration/requests": new RawResponse(422, {
         type: "https://bank.example/problems/invalid-input", title: "入力データに誤りがあります", detail: "取り込みませんでした。",
         errors: [{ line: 3, message: "金額が正しくありません" }, { line: 0, message: "合計が一致しません" }],
       }, "application/problem+json"),
     });
-    const err = (await integrationApi.submit("zengin", "x", "text/plain").catch((e: unknown) => e)) as ApiError;
+    const err = (await integrationApi.createRequest("zengin", "x", "text/plain").catch((e: unknown) => e)) as ApiError;
     expect(err).toBeInstanceOf(ApiError);
     expect(err.status).toBe(422);
     expect(err.code).toBe("INVALID_INPUT");
@@ -26,18 +29,35 @@ describe("integrationApi", () => {
     expect(err.fieldErrors.errors).toEqual(["3 行目：金額が正しくありません", "合計が一致しません"]);
   });
 
-  it("送信は XHR ヘッダーと Content-Type を付け、成功・失敗にかかわらずキャッシュを無効化する", async () => {
+  it("承認依頼の作成は XHR ヘッダー・CSRF トークン・Content-Type・ファイル名を付け、一覧のキャッシュを無効化する", async () => {
     const inv = vi.spyOn(query, "invalidate");
-    mockApi({ "/api/integration/fx": new RawResponse(200, { updated: ["USD"] }) });
-    await integrationApi.submit("fx", SAMPLE_FX, "application/json");
-    const [c] = callsTo("/api/integration/fx");
-    expect(c.headers).toMatchObject({ "Content-Type": "application/json", "X-Requested-With": "XMLHttpRequest" });
-    expect(c.body).toMatchObject({ provider: "DEMO-FX" });
-    mockApi({ "/api/integration/billing": new RawResponse(502, { title: "勘定系システムに接続できません" }) });
-    await expect(integrationApi.submit("billing", SAMPLE_BILLING, "text/csv")).rejects.toMatchObject({ status: 502 });
-    expect(inv).toHaveBeenCalledTimes(2);
+    mockApi({ "/api/integration/csrf": new RawResponse(200, { token: "t1" }), "/api/integration/requests": new RawResponse(201, { requestId: "r1" }) });
+    await integrationApi.createRequest("fx", SAMPLE_FX, "application/json", "相場.json", "定例");
+    const [c] = callsTo("/api/integration/requests").filter((x) => x.method === "POST");
+    expect(c.query.get("kind")).toBe("fx");
+    expect(c.headers).toMatchObject({
+      "Content-Type": "application/json", "X-Requested-With": "XMLHttpRequest", "X-CSRF-Token": "t1",
+      "X-File-Name": encodeURIComponent("相場.json"), "X-Comment": encodeURIComponent("定例"),
+    });
+    expect(inv).toHaveBeenCalledWith("integration-requests");
   });
 
+  it("CSRF トークンが古くて拒否されたら、1 回だけ取り直して再送する。承認・再送は画面のキャッシュをすべて無効化する", async () => {
+    let n = 0;
+    mockApi({
+      "/api/integration/csrf": () => new RawResponse(200, { token: `t${++n}` }),
+      "/api/integration/requests/r1/approve": (req: { headers: Record<string, string> }) => req.headers["X-CSRF-Token"] === "t2"
+        ? new RawResponse(200, { httpStatus: 200, kind: "fx", result: {}, request: null })
+        : new RawResponse(403, { title: "不正な要求です", detail: "画面を再読み込みしてからやり直してください。" }, "application/problem+json"),
+    });
+    const inv = vi.spyOn(query, "invalidate");
+    await expect(integrationApi.approve("r1")).resolves.toMatchObject({ httpStatus: 200 });
+    expect(callsTo("/api/integration/requests/r1/approve")).toHaveLength(2);
+    expect(inv).toHaveBeenCalledWith("*");
+    mockApi({ "/api/integration/requests/r1/reject": new RawResponse(200, { status: "REJECTED" }) });
+    await integrationApi.reject("r1", "誤り");
+    expect(callsTo("/api/integration/requests/r1/reject")[0].body).toEqual({ reason: "誤り" });
+  });
   it("通信エラーは NETWORK_ERROR", async () => {
     vi.mocked(fetch).mockRejectedValueOnce(new TypeError("down"));
     await expect(integrationApi.runs()).rejects.toMatchObject({ code: "NETWORK_ERROR" });

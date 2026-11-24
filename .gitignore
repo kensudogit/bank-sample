@@ -12,3 +12,10 @@ backend/bin/
 
 # Railway の構成コード（.railway/railway.ts）の実行用 SDK（npm install --no-save railway）
 /node_modules/
+
+# Terraform（state には Railway の ID・設定値が入る。チームで使うときは backend.tf でリモートの保存先を設定する）
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+

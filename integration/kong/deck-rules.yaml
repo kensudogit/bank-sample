@@ -1,0 +1,84 @@
+# decK（deck file lint）の規約：Kong の宣言的設定が安全側の約束を守っているかを CI で確かめる。
+# スキーマの検証は Kong 自身の kong config parse で行う（decK のオフライン検証は jwt_secrets の RS256 で secret を必須と誤判定するため）。
+#   deck file lint -s /tmp/kong.yml integration/kong/deck-rules.yaml
+rules:
+  integration-services-require-jwt:
+    description: 外部連携のサービスは OAuth 2.0 のアクセストークン（jwt）で認証する
+    given: $.services[?(@.name && @.name.match(/^integration-/))]
+    severity: error
+    then:
+      field: plugins
+      function: schema
+      functionOptions:
+        schema:
+          type: array
+          contains: { type: object, required: [name], properties: { name: { const: jwt } } }
+
+  integration-services-check-claims:
+    description: 外部連携のサービスはトークンの iss・aud・roles も検証する（bank-token-claims）
+    given: $.services[?(@.name && @.name.match(/^integration-/))]
+    severity: error
+    then:
+      field: plugins
+      function: schema
+      functionOptions:
+        schema:
+          type: array
+          contains: { type: object, required: [name], properties: { name: { const: bank-token-claims } } }
+
+  submit-services-limit-rate-and-acl:
+    description: データを受け取るサービスは ACL とレート制限（Redis で共有）を持つ
+    given: $.services[?(@.name == 'integration-zengin' || @.name == 'integration-billing' || @.name == 'integration-fx')]
+    severity: error
+    then:
+      field: plugins
+      function: schema
+      functionOptions:
+        schema:
+          type: array
+          allOf:
+            - contains: { type: object, required: [name], properties: { name: { const: acl } } }
+            - contains:
+                type: object
+                required: [name, config]
+                properties:
+                  name: { const: rate-limiting }
+                  config: { type: object, required: [policy], properties: { policy: { const: redis } } }
+
+  mule-over-mtls:
+    description: MuleSoft への転送は HTTPS（mTLS）で、証明書を検証する
+    given: $.services[?(@.url && @.url.match(/mule/))]
+    severity: error
+    then:
+      - field: url
+        function: pattern
+        functionOptions: { match: "^https://" }
+      - field: tls_verify
+        function: truthy
+      - field: client_certificate
+        function: truthy
+
+  no-api-keys:
+    description: API キー（key-auth）は使わない（OAuth 2.0 に移行済み）
+    given: $..plugins[*].name
+    severity: error
+    then:
+      function: pattern
+      functionOptions: { notMatch: "^key-auth$" }
+
+  core-api-adds-gateway-secret:
+    description: 勘定系への転送は共有シークレットを付け直す（送信元の同名ヘッダーは消す）
+    given: $.services[?(@.name == 'bank-core-api')]
+    severity: error
+    then:
+      field: plugins
+      function: schema
+      functionOptions:
+        schema:
+          type: array
+          contains:
+            type: object
+            required: [name, config]
+            properties:
+              name: { const: request-transformer }
+              config: { type: object, required: [remove, add] }

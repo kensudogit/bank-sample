@@ -149,6 +149,97 @@ public class AuditRepository {
         }
     }
 
+    /** チェーンの起点（保存期間を過ぎて削除した範囲の最後の行の ID とハッシュ。削除前は 0 と 0 埋め）。 */
+    public String[] base(Connection c) throws SQLException {
+        try (PreparedStatement ps = c.prepareStatement("SELECT base_id, base_hash FROM audit_chain WHERE chain_id = 1");
+             ResultSet rs = ps.executeQuery()) {
+            if (!rs.next()) throw new SQLException("audit_chain head missing");
+            return new String[]{String.valueOf(rs.getLong(1)), rs.getString(2)};
+        }
+    }
+
+    /**
+     * 保存期間を過ぎた行を古い順に削除し、削除した最後の行を新しい起点にする（チェーンの先頭をロックして直列化）。
+     * 期限内の行より後ろは削除しない（途中に穴を開けない）。
+     *
+     * @param cutoff この日時より前に記録された行が削除の対象
+     * @param max    1 回に削除する最大行数
+     * @return 削除した行数
+     */
+    public int purgeBefore(Connection c, LocalDateTime cutoff, int max) throws SQLException {
+        long baseId;
+        long lastId;
+        try (PreparedStatement ps = c.prepareStatement("SELECT base_id, last_id FROM audit_chain WHERE chain_id = 1 FOR UPDATE");
+             ResultSet rs = ps.executeQuery()) {
+            if (!rs.next()) throw new SQLException("audit_chain head missing");
+            baseId = rs.getLong(1);
+            lastId = rs.getLong(2);
+        }
+        // 期限内の最初の行の直前までが削除できる範囲（行は記録順に ID が増える）
+        long firstKept = lastId + 1;
+        try (PreparedStatement ps = c.prepareStatement("SELECT MIN(audit_id) FROM audit_log WHERE occurred_at >= ?")) {
+            ps.setTimestamp(1, Timestamp.valueOf(cutoff));
+            try (ResultSet rs = ps.executeQuery()) {
+                if (rs.next() && rs.getObject(1) != null) firstKept = rs.getLong(1);
+            }
+        }
+        long upTo = Math.min(firstKept - 1, baseId + max);
+        if (upTo <= baseId) return 0;
+        String hash;
+        try (PreparedStatement ps = c.prepareStatement("SELECT row_hash FROM audit_log WHERE audit_id = ?")) {
+            ps.setLong(1, upTo);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (!rs.next()) throw new SQLException("audit_log row " + upTo + " missing");
+                hash = rs.getString(1);
+            }
+        }
+        int deleted;
+        try (PreparedStatement ps = c.prepareStatement("DELETE FROM audit_log WHERE audit_id > ? AND audit_id <= ?")) {
+            ps.setLong(1, baseId);
+            ps.setLong(2, upTo);
+            deleted = ps.executeUpdate();
+        }
+        try (PreparedStatement ps = c.prepareStatement("UPDATE audit_chain SET base_id = ?, base_hash = ? WHERE chain_id = 1")) {
+            ps.setLong(1, upTo);
+            ps.setString(2, hash);
+            ps.executeUpdate();
+        }
+        return deleted;
+    }
+
+    /** 日次のアンカー（その時点のチェーン先頭）を記録する。同じ日に 2 回目は記録しない。 @return 記録した [last_id, last_hash]。記録済みなら null */
+    public String[] anchor(Connection c, java.time.LocalDate date, LocalDateTime now) throws SQLException {
+        try (PreparedStatement ps = c.prepareStatement("SELECT 1 FROM audit_anchor WHERE anchor_date = ?")) {
+            ps.setObject(1, date);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (rs.next()) return null;
+            }
+        }
+        String[] head = head(c);
+        try (PreparedStatement ps = c.prepareStatement(
+                "INSERT INTO audit_anchor (anchor_date, last_id, last_hash, created_at) VALUES (?, ?, ?, ?)")) {
+            ps.setObject(1, date);
+            ps.setLong(2, Long.parseLong(head[0]));
+            ps.setString(3, head[1]);
+            ps.setTimestamp(4, Timestamp.valueOf(now));
+            ps.executeUpdate();
+        }
+        return head;
+    }
+
+    /** 起点より後のアンカー（[anchor_date, last_id, last_hash]）。 */
+    public List<String[]> anchorsAfter(Connection c, long baseId) throws SQLException {
+        List<String[]> list = new ArrayList<>();
+        try (PreparedStatement ps = c.prepareStatement(
+                "SELECT anchor_date, last_id, last_hash FROM audit_anchor WHERE last_id > ? ORDER BY anchor_date")) {
+            ps.setLong(1, baseId);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) list.add(new String[]{String.valueOf(rs.getObject(1)), String.valueOf(rs.getLong(2)), rs.getString(3)});
+            }
+        }
+        return list;
+    }
+
     /** チェーン先頭（最後に追記した行の ID とハッシュ）。 */
     public String[] head(Connection c) throws SQLException {
         try (PreparedStatement ps = c.prepareStatement("SELECT last_id, last_hash FROM audit_chain WHERE chain_id = 1");

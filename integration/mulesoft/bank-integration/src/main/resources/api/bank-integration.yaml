@@ -4,14 +4,20 @@ info:
   version: 1.0.0
   description: |
     他行・収納企業・為替相場の提供元から受け取るデータを、勘定系（Struts 2 / Liberty）の形式に変換して取り込む。
-    外部からは Kong 経由（/integration/v1/*、API キー＋ACL）でのみ呼べる。Mule アプリ自身は社内ネットワークに置く。
+    外部からは Kong 経由（/integration/v1/*）でのみ呼べる。認証は OAuth 2.0 のクライアントクレデンシャル（Bearer の JWT。
+    Kong が署名・iss・aud・exp・roles を検証し、ACL で呼べる API を限定する）。Mule アプリは社内ネットワークに置き、
+    Kong のクライアント証明書（mTLS）がある接続だけを受け付ける。
+    冪等性：Idempotency-Key（なければ本文の SHA-256）が同じ送信は 1 回だけ処理し、完了後の再送には同じ応答を返す
+    （Idempotent-Replayed: true）。勘定系の障害（502）で失敗した送信は、同じキーで再送すると再処理される。
     エラーは RFC 9457（application/problem+json）で返す。
     デモ用サンプル（架空データ）。本番利用不可。
 servers:
   - url: http://localhost:8088/integration/v1
     description: Kong 経由（ローカル）
-  - url: http://mule:8081/api/v1
-    description: Mule アプリ（社内ネットワーク内）
+  - url: https://mule:8443/api/v1
+    description: Mule アプリ（社内ネットワーク内。mTLS）
+security:
+  - bankOAuth: []
 tags:
   - name: zengin
     description: 全銀システムからの被仕向振込（入金）
@@ -31,6 +37,9 @@ paths:
         当行（9999）宛てのデータを勘定系の被仕向入金 API へ 100 件ずつ送る。口座番号と受取人名が一致すれば入金、
         不一致は保留。仕向銀行コードと照会番号が同じデータは二重に入金されない（重複として返る）。
         文字コードは Content-Type の charset（UTF-8 または Shift_JIS）。
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/OperatorToken"
       requestBody:
         required: true
         content:
@@ -42,7 +51,11 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ZenginResult" }
+        "401": { description: "トークンがない・期限切れ（Kong）" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
         "422": { $ref: "#/components/responses/Problem" }
+        "429": { description: "利用者ごとの上限を超えた（Kong。Redis で全台共有）" }
         "502": { $ref: "#/components/responses/Problem" }
   /billing/import:
     post:
@@ -51,6 +64,9 @@ paths:
       description: |
         1 行目は見出し（収納企業コード,お客さま番号,金額,引落日 または billerCode,payerNumber,amount,dueDate）。
         金額はカンマ付きも可、引落日は yyyy-MM-dd または yyyyMMdd。最大 1,000 行。
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/OperatorToken"
       requestBody:
         required: true
         content:
@@ -62,13 +78,20 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/BillingResult" }
+        "401": { description: "トークンがない・期限切れ（Kong）" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
         "422": { $ref: "#/components/responses/Problem" }
+        "429": { description: "利用者ごとの上限を超えた（Kong。Redis で全台共有）" }
         "502": { $ref: "#/components/responses/Problem" }
   /fx/rates:
     post:
       tags: [fx]
       summary: 為替相場の提供元から仲値とスプレッドを受け取り、公示相場を更新する
       description: 当行が扱う通貨（USD・EUR）だけを更新し、それ以外は skipped として返す。
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/OperatorToken"
       requestBody:
         required: true
         content:
@@ -80,7 +103,11 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/FxResult" }
+        "401": { description: "トークンがない・期限切れ（Kong）" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
         "422": { $ref: "#/components/responses/Problem" }
+        "429": { description: "利用者ごとの上限を超えた（Kong。Redis で全台共有）" }
         "502": { $ref: "#/components/responses/Problem" }
   /health:
     get:
@@ -110,6 +137,30 @@ paths:
                 type: array
                 items: { $ref: "#/components/schemas/Run" }
 components:
+  securitySchemes:
+    bankOAuth:
+      type: oauth2
+      description: |
+        クライアントクレデンシャル。ロール：Zengin.Submit / Billing.Submit / Fx.Submit / Ops.Submit / Ops.Read / Integration.Health。
+        本番は Microsoft Entra ID（tokenUrl は https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token、scope は {Application ID URI}/.default）。
+      flows:
+        clientCredentials:
+          tokenUrl: http://localhost:8088/oauth2/token
+          scopes:
+            "api://bank-integration/.default": 割り当てられたロールすべて
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      description: "送信の冪等キー（英数字と _ . : - の 8〜80 文字）。省略時は本文の SHA-256"
+      schema: { type: string, pattern: "^[A-Za-z0-9_.:-]{8,80}$" }
+    OperatorToken:
+      name: X-Bank-Operator-Token
+      in: header
+      required: false
+      description: 連携コンソール（bank-ops）専用。作成者・承認者・依頼 ID・本文の SHA-256 を HS256 で署名した JWT（2 分有効）
+      schema: { type: string }
   responses:
     Problem:
       description: エラー（RFC 9457）
@@ -204,8 +255,11 @@ components:
         kind: { type: string, enum: [ZENGIN_INCOMING, BILLING_IMPORT, FX_RATES] }
         startedAt: { type: string, format: date-time }
         durationMs: { type: integer }
-        outcome: { type: string, enum: [SUCCESS, PARTIAL, FAILURE] }
+        status: { type: string, enum: [PROCESSING, COMPLETED, FAILED], description: "FAILED は同じ冪等キーの再送で再処理できる" }
+        outcome: { type: string, enum: [SUCCESS, PARTIAL, FAILURE, PROCESSING] }
         consumer: { type: string, description: "Kong の利用者（X-Consumer-Username）" }
-        operator: { type: string, nullable: true, description: "連携コンソールから実行した行員（bank-ops 経由のみ）" }
+        operator: { type: string, nullable: true, description: "連携コンソールの依頼の作成者（署名付きトークンから。bank-ops 経由のみ）" }
+        approver: { type: string, nullable: true, description: "連携コンソールの依頼の承認者（作成者とは別の役席）" }
+        attempts: { type: integer, description: "処理した回数（再処理で増える）" }
         requestId: { type: string }
         summary: { type: string }

@@ -48,6 +48,10 @@ public enum ErrorCode {
     BANK_NOT_FOUND("unprocessable"),              // 422
     MANDATE_NOT_FOUND("notFound"),                // 404
     ALERT_NOT_FOUND("notFound"),                  // 404
+    INTEGRATION_RUN_NOT_FOUND("notFound"),        // 404 連携の実行がない
+    INTEGRATION_REQUEST_NOT_FOUND("notFound"),    // 404 手動送信の依頼がない
+    INTEGRATION_STATE_INVALID("conflict"),        // 409 依頼・実行の状態がその操作を許さない
+    INTEGRATION_SAME_PERSON("unprocessable"),     // 422 作成者本人は承認・却下できない（職務分離）
     SYSTEM_ERROR("systemError");                  // 500
 
     private final String resultName;

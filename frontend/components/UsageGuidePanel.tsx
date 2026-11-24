@@ -209,12 +209,13 @@ const steps = [
     title: "13. 外部連携（Kong・MuleSoft・役席）",
     body: "ADMIN メニューの「外部連携」。他行・収納企業・為替相場の提供元からのデータを、Kong（API ゲートウェイ）→ MuleSoft（変換）→ 勘定系の順に取り込みます。",
     items: [
-      "画面の API は Kong 経由（ログイン 20 回/分・API 1,200 回/分の制限、Liberty 2 台のヘルスチェック付き負荷分散）",
-      "連携先は http://localhost:8088/integration/v1/*（API キー＋連携先ごとの許可）。鍵は .env の KONG_KEY_*",
+      "画面の API は Kong 経由（ログイン 20 回/分・API 1,200 回/分の制限を Redis で全台共有、Liberty 2 台のヘルスチェック付き負荷分散）。Liberty は Kong を経由しない要求を拒否",
+      "連携先は OAuth 2.0 のトークン（/oauth2/token）で http://localhost:8088/integration/v1/* を呼ぶ（ロールと連携先ごとの許可）。Kong → MuleSoft は mTLS",
       "全銀データ（120 桁固定長・UTF-8 / Shift_JIS）：件数と合計を検証し、口座番号と受取人名が一致すれば入金、不一致は保留。同じファイルを再送しても二重に入金されない",
-      "請求データ（CSV）と為替相場（JSON）も同じ画面から送信でき、結果と実行履歴（誰が・いつ・何件）を確認できる",
+      "画面からの送信は二者承認：「承認依頼を作成」した役席とは別の役席が「承認して送信」したときだけ送信。失敗した送信は「再送」できる（二重には取り込まれない）",
+      "請求データ（CSV）と為替相場（JSON）も同じ。実行履歴（作成者・承認者・件数・結果）は Oracle に保存され、再起動しても消えない",
       "MuleSoft は Mule 4 アプリ一式（integration/mulesoft）。ローカルでは同じ API 契約の互換コンテナ（mule）で動く",
-      "初回のみ：12_integration.sql を適用し、python integration/scripts/set_service_password.py で連携用アカウントを有効化",
+      "初回のみ：bash integration/scripts/gen-secrets.sh >> .env で秘密情報を作り、12〜14 の DB スクリプトを適用し、python integration/scripts/set_service_password.py で連携用アカウントを有効化",
     ],
   },
   {

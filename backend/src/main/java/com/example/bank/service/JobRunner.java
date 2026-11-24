@@ -56,6 +56,8 @@ public class JobRunner {
     public static final String GL_POSTING = "GL_POSTING";
     public static final String MONTH_END = "MONTH_END";
     public static final String REPORTS = "REPORTS";
+    public static final String AUDIT_ANCHOR = "AUDIT_ANCHOR";
+    public static final String AUDIT_RETENTION = "AUDIT_RETENTION";
     /** この時刻より前はジョブを開始しない（前日分の取引が出そろってから処理する） */
     public static final LocalTime START_TIME = LocalTime.of(1, 0);
     /** 冪等キーの保存日数（これより古い再送は新しい要求として扱われる） */
@@ -212,6 +214,15 @@ public class JobRunner {
             int deleted = Transactions.inTransaction(dataSource.get(),
                     c -> runs.deleteRequestsBefore(c, LocalDateTime.now(clock).minusDays(REQUEST_RETENTION_DAYS)));
             return "冪等キー " + deleted + " 件を削除";
+        }));
+        jobs.add(new JobDef(AUDIT_ANCHOR, "監査ログのアンカー記録", "毎日", daily, (d, by) -> {
+            // その日のチェーン先頭を DB とアプリケーションログの両方に残す（後からの書き換えを検出できるように）
+            Map<String, Object> a = audit.anchor(d);
+            return a == null ? "記録済み" : "監査ログ 先頭 " + a.get("lastId") + "（" + String.valueOf(a.get("lastHash")).substring(0, 12) + "…）";
+        }));
+        jobs.add(new JobDef(AUDIT_RETENTION, "監査ログの保存期間管理", "毎日", daily, (d, by) -> {
+            int deleted = audit.purgeExpired();
+            return "保存期間を過ぎた監査ログ " + deleted + " 件を削除";
         }));
         // 情報系の取込みは、前日分の勘定系の処理（満期・返済・口座振替）が終わった後に行う
         jobs.add(new JobDef(DW_LOAD, "情報系の取込み", "毎日（前日分）", daily, (d, by) -> {

@@ -533,9 +533,21 @@ public class PaymentService {
 
     /** 収納企業からの請求データの取込み。契約のない請求は取り込まずに結果で返す。 */
     public List<Map<String, Object>> importBilling(List<Billing> items) {
-        List<Map<String, Object>> results = new ArrayList<>();
-        // 取込は全件を 1 トランザクションで行う（Action 側で件数の上限を設けている）
-        Transactions.inTransaction(dataSource.get(), c -> {
+        try {
+            return importBillingOnce(items);
+        } catch (com.example.bank.support.DataAccessException e) {
+            // 同じ請求が別の要求で同時に取り込まれた（一意索引 uq_dd_request で全体がロールバック済み）。
+            // もう一度実行すると、先に取り込まれた行は「重複（取込済み）」になる
+            if (!isUniqueViolation(e)) throw e;
+            return importBillingOnce(items);
+        }
+    }
+
+    private List<Map<String, Object>> importBillingOnce(List<Billing> items) {
+        // 取込は全件を 1 トランザクションで行う（Action 側で件数の上限を設けている）。
+        // 結果のリストはトランザクションの中で作る（一時的な障害で再試行されたとき、前回の途中結果を残さない）
+        return Transactions.inTransaction(dataSource.get(), c -> {
+            List<Map<String, Object>> results = new ArrayList<>();
             LocalDateTime now = LocalDateTime.now(clock);
             for (Billing b : items) {
                 Map<String, Object> r = new LinkedHashMap<>();
@@ -561,9 +573,8 @@ public class PaymentService {
                 }
                 results.add(r);
             }
-            return null;
+            return results;
         });
-        return results;
     }
 
     /** 引落日の到来した請求を処理する（夜間バッチ）。結果コード 0: 振替済 / 1: 資金不足 / 2: 取引なし。 */

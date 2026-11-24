@@ -9,13 +9,14 @@
 | API | Apache Struts 2.6 系（6.13.0）+ struts2-json-plugin、JDBC |
 | ビルド | **Gradle 8.14.3**（Wrapper 同梱、Java 8 向けにコンパイル） |
 | データベース | **Oracle Database 23ai Free**（gvenzl/oracle-free、PDB `FREEPDB1`、スキーマ `BANK`） |
-| 実行環境 | Docker Compose（oracle / liberty ×2 / frontend ×2 / lb（nginx）） |
+| 実行環境 | Docker Compose（oracle / liberty ×2 / frontend ×2 / lb（nginx）/ kong / mule / auth / redis。監視は profile `observability`） |
 
 ```text
 ブラウザ ──▶ lb (nginx :3000) ──▶ frontend ×2 (Next.js)
                                     │  /api/bank/*  を同一オリジンでプロキシ（CORS 不要）
                                     ▼
-             lb (nginx :9080) ──▶ liberty ×2 (WebSphere Liberty, /bank/api/*)
+             kong (:8000, Host: kong) ──▶ liberty ×2 (WebSphere Liberty, /bank/api/*)
+                                    │  Liberty は Kong が付ける共有シークレットのない要求を拒否（ゲートウェイ迂回の防止）
                                     │  Struts 2 Action → Service → JDBC（JNDI DataSource jdbc/bankDS）
                                     │  ログインセッションも Oracle に保存（どのインスタンスでも継続）
                                     ▼
@@ -147,7 +148,7 @@ docker compose exec oracle bash -c "sqlplus -s / as sysdba @/container-entrypoin
 
 ## API（WebSphere Liberty 上の Struts 2）
 
-ベース URL: `http://localhost:9080/bank/api`（フロントからは `/api/bank`）
+ベース URL: `http://localhost:3000/api/bank`（画面と同じ入口。frontend → Kong → Liberty。Liberty へ直接は呼べません）
 
 | メソッド | パス | 内容 |
 |---|---|---|
@@ -201,15 +202,15 @@ docker compose exec oracle bash -c "sqlplus -s / as sysdba @/container-entrypoin
 - 金額は円単位の整数を**文字列**で送ります（浮動小数点誤差を避けるため）。1 回あたり上限 10,000,000 円。
 
 ```bash
-curl -s -c cookie.txt -X POST http://127.0.0.1:9080/bank/api/login -H "Content-Type: application/json" -H "X-Requested-With: XMLHttpRequest" -d "{\"userId\":\"teller1\",\"password\":\"BankDemo#2026\"}"
+curl -s -c cookie.txt -X POST http://127.0.0.1:3000/api/bank/login -H "Content-Type: application/json" -H "X-Requested-With: XMLHttpRequest" -d "{\"userId\":\"teller1\",\"password\":\"BankDemo#2026\"}"
 ```
 
 ```bash
-curl -s -b cookie.txt http://127.0.0.1:9080/bank/api/accounts
+curl -s -b cookie.txt http://127.0.0.1:3000/api/bank/accounts
 ```
 
 ```bash
-curl -s -b cookie.txt -X POST http://127.0.0.1:9080/bank/api/transfer -H "Content-Type: application/json" -H "X-Requested-With: XMLHttpRequest" -d "{\"fromAccountNo\":\"1000001\",\"toAccountNo\":\"1000003\",\"amount\":\"5000\",\"memo\":\"test\",\"idempotencyKey\":\"0f8fad5b-d9cb-469f-a165-70867728950e\"}"
+curl -s -b cookie.txt -X POST http://127.0.0.1:3000/api/bank/transfer -H "Content-Type: application/json" -H "X-Requested-With: XMLHttpRequest" -d "{\"fromAccountNo\":\"1000001\",\"toAccountNo\":\"1000003\",\"amount\":\"5000\",\"memo\":\"test\",\"idempotencyKey\":\"0f8fad5b-d9cb-469f-a165-70867728950e\"}"
 ```
 
 Windows でスクリプトや curl から呼ぶ場合は `localhost` ではなく `127.0.0.1` を使ってください。ポートは IPv4 ループバックにのみ公開しているため、`localhost` だと先に `::1` への接続を試みて毎回約 200 ms 待たされます（ブラウザーは影響を受けません）。
@@ -430,12 +431,15 @@ bank-sample/
 ## 外部連携（Kong × MuleSoft）
 
 画面の API は **Kong Gateway**（OSS 3.9・DB-less）を通って Liberty ×2 に届きます（流量制限・ヘルスチェック付きの負荷分散）。
-他行の全銀データ・収納企業の請求データ・為替相場は、連携先が `http://127.0.0.1:8088/integration/v1/*` を API キーで呼び、
-**MuleSoft**（Mule 4 の Process API。ローカルでは同じ API 契約の互換コンテナ）が検証・変換して勘定系へ取り込みます。
-役席は ADMIN →「外部連携」から送信と実行履歴の確認ができます。
+他行の全銀データ・収納企業の請求データ・為替相場は、連携先が OAuth 2.0 のアクセストークン（`/oauth2/token`）で
+`http://127.0.0.1:8088/integration/v1/*` を呼び、**MuleSoft**（Mule 4 の Process API。ローカルでは同じ API 契約の互換コンテナ。Kong とは mTLS）が
+検証・変換して勘定系へ取り込みます。同じデータの再送は冪等キーで 1 回だけ処理され、実行履歴は Oracle に残ります。
+役席は ADMIN →「外部連携」から送信できます（**二者承認**：作成した役席とは別の役席が承認したときだけ送信）。
 
-初回は `.env` に `KONG_KEY_ZENGIN`・`KONG_KEY_BILLING`・`KONG_KEY_FX`・`KONG_KEY_OPS`・`MULE_CORE_PASSWORD` を追加し、
-`12_integration.sql` の適用と `python integration/scripts/set_service_password.py` で連携用アカウントを有効化します。
+初回は `bash integration/scripts/gen-secrets.sh >> .env` で秘密情報（OAuth の鍵とクライアントシークレット・mTLS の証明書・共有シークレットなど）を作り、
+`MULE_CORE_PASSWORD` を加えて、`12`〜`14` の DB スクリプトの適用と `python integration/scripts/set_service_password.py` で連携用アカウントを有効化します。
+強化の 12 項目（実行履歴の永続化・二重入金防止・職務分離・ゲートウェイ迂回防止・行員 ID の署名・OAuth/mTLS/Entra ID・CSRF・再処理・
+分散流量制御・監査ログ保護・統合監視・構成管理）は [integration/docs/hardening.md](integration/docs/hardening.md)。
 手順・設計（ADR・経路・セキュリティ・運用）は [integration/README.md](integration/README.md) を参照してください。
 
 ## ローカル開発（コンテナを使わない部分）

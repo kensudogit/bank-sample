@@ -1,0 +1,12 @@
+{
+  "name": "bank-auth-server",
+  "version": "1.0.0",
+  "private": true,
+  "description": "OAuth 2.0 トークン発行サーバー（クライアントクレデンシャル・RS256。本番は Entra ID などの IdP に置き換える）",
+  "type": "module",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "start": "node src/server.mjs",
+    "test": "node --test"
+  }
+}

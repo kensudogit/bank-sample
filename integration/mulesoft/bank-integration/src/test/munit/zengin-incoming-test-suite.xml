@@ -22,7 +22,8 @@
           <munit-tools:with-attribute attributeName="name" whereValue="core-post"/>
         </munit-tools:with-attributes>
         <munit-tools:then-return>
-          <munit-tools:payload value="#[[{ status: 'CREDITED', note: null }, { status: 'HELD', note: '受取人名不一致' }]]"/>
+          <!-- 実行の登録（NEW）→ 被仕向入金 → 実行の完了の順に呼ばれる -->
+          <munit-tools:payload value="#[if (vars.corePath == '/integration-run-start') { state: 'NEW', runId: 'run-1' } else if (vars.corePath == '/integration-run-finish') { runId: 'run-1' } else [{ status: 'CREDITED', note: null }, { status: 'HELD', note: '受取人名不一致' }]]"/>
         </munit-tools:then-return>
       </munit-tools:mock-when>
     </munit:behavior>
@@ -40,7 +41,7 @@
       <munit-tools:assert-equals actual="#[payload.summary.credited]" expected="#[1]"/>
       <munit-tools:assert-equals actual="#[payload.summary.held]" expected="#[1]"/>
       <munit-tools:assert-equals actual="#[payload.results[0].referenceNo]" expected="#['ZG-0005-1124-0000000001']"/>
-      <munit-tools:verify-call processor="flow-ref" times="1">
+      <munit-tools:verify-call processor="flow-ref" times="3">
         <munit-tools:with-attributes>
           <munit-tools:with-attribute attributeName="name" whereValue="core-post"/>
         </munit-tools:with-attributes>
@@ -53,6 +54,44 @@
     <munit:execution>
       <munit:set-event>
         <munit:payload value="#[MunitTools::getResourceAsString('fixtures/zengin-incoming-sample.txt') replace '000000125000' with '000000999999']" mediaType="text/plain; charset=UTF-8"/>
+      </munit:set-event>
+      <flow-ref name="zengin-incoming-flow"/>
+    </munit:execution>
+  </munit:test>
+  <munit:test name="completed-file-is-replayed-without-calling-core" description="完了済みのファイルの再送は、勘定系の入金 API を呼ばずに保存した応答を返す">
+    <munit:behavior>
+      <munit-tools:mock-when processor="flow-ref">
+        <munit-tools:with-attributes>
+          <munit-tools:with-attribute attributeName="name" whereValue="core-post"/>
+        </munit-tools:with-attributes>
+        <munit-tools:then-return>
+          <munit-tools:payload value="#[{ state: 'REPLAY', runId: 'run-1', httpStatus: 200, response: '{&quot;records&quot;:2}' }]"/>
+        </munit-tools:then-return>
+      </munit-tools:mock-when>
+    </munit:behavior>
+    <munit:execution>
+      <munit:set-event>
+        <munit:payload value="#[MunitTools::getResourceAsString('fixtures/zengin-incoming-sample.txt')]" mediaType="text/plain; charset=UTF-8"/>
+        <munit:attributes value="#[{ headers: { 'x-request-id': 'test-2', 'x-consumer-username': 'zengin-network' } }]"/>
+      </munit:set-event>
+      <flow-ref name="zengin-incoming-flow"/>
+    </munit:execution>
+    <munit:validation>
+      <munit-tools:assert-equals actual="#[vars.replayed]" expected="#[true]"/>
+      <munit-tools:verify-call processor="flow-ref" times="1">
+        <munit-tools:with-attributes>
+          <munit-tools:with-attribute attributeName="name" whereValue="core-post"/>
+        </munit-tools:with-attributes>
+      </munit-tools:verify-call>
+    </munit:validation>
+  </munit:test>
+
+  <munit:test name="console-without-operator-token-is-forbidden" description="連携コンソール（bank-ops）からの送信は行員トークンが必須"
+              expectedErrorType="APP:FORBIDDEN">
+    <munit:execution>
+      <munit:set-event>
+        <munit:payload value="#[MunitTools::getResourceAsString('fixtures/zengin-incoming-sample.txt')]" mediaType="text/plain; charset=UTF-8"/>
+        <munit:attributes value="#[{ headers: { 'x-consumer-username': 'bank-ops', 'x-bank-operator': 'supervisor1' } }]"/>
       </munit:set-event>
       <flow-ref name="zengin-incoming-flow"/>
     </munit:execution>

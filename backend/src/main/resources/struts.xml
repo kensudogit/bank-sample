@@ -291,6 +291,35 @@
     <action name="billing-import" class="com.example.bank.action.PaymentAction" method="billingImport">
       <interceptor-ref name="apiWriteStack"><param name="apiGuardWrite.roles">TELLER,SUPERVISOR,INTEGRATION</param></interceptor-ref>
     </action>
+    <!-- 外部連携の実行履歴（MuleSoft のサービスアカウントだけ。冪等キー・再処理の状態を Oracle に保存する） -->
+    <action name="integration-run-start" class="com.example.bank.action.IntegrationAction" method="runStart">
+      <interceptor-ref name="apiWriteStack"><param name="apiGuardWrite.roles">INTEGRATION</param></interceptor-ref>
+    </action>
+    <action name="integration-run-finish" class="com.example.bank.action.IntegrationAction" method="runFinish">
+      <interceptor-ref name="apiWriteStack"><param name="apiGuardWrite.roles">INTEGRATION</param></interceptor-ref>
+    </action>
+    <action name="integration-runs" class="com.example.bank.action.IntegrationAction" method="runs">
+      <interceptor-ref name="apiReadStack"><param name="apiGuardRead.roles">INTEGRATION</param></interceptor-ref>
+    </action>
+    <!-- 連携コンソールの手動送信（二者承認：作成した役席とは別の役席が承認したときだけ送信する） -->
+    <action name="integration-requests" class="com.example.bank.action.IntegrationAction" method="requests">
+      <interceptor-ref name="apiReadStack"><param name="apiGuardRead.roles">SUPERVISOR</param></interceptor-ref>
+    </action>
+    <action name="integration-request-create" class="com.example.bank.action.IntegrationAction" method="requestCreate">
+      <interceptor-ref name="apiWriteStack"><param name="apiGuardWrite.roles">SUPERVISOR</param></interceptor-ref>
+    </action>
+    <action name="integration-request-approve" class="com.example.bank.action.IntegrationAction" method="requestApprove">
+      <interceptor-ref name="apiWriteStack"><param name="apiGuardWrite.roles">SUPERVISOR</param></interceptor-ref>
+    </action>
+    <action name="integration-request-reject" class="com.example.bank.action.IntegrationAction" method="requestReject">
+      <interceptor-ref name="apiWriteStack"><param name="apiGuardWrite.roles">SUPERVISOR</param></interceptor-ref>
+    </action>
+    <action name="integration-request-redispatch" class="com.example.bank.action.IntegrationAction" method="requestRedispatch">
+      <interceptor-ref name="apiWriteStack"><param name="apiGuardWrite.roles">SUPERVISOR</param></interceptor-ref>
+    </action>
+    <action name="integration-request-complete" class="com.example.bank.action.IntegrationAction" method="requestComplete">
+      <interceptor-ref name="apiWriteStack"><param name="apiGuardWrite.roles">SUPERVISOR</param></interceptor-ref>
+    </action>
     <action name="debit-requests" class="com.example.bank.action.PaymentAction" method="debitRequests"/>
     <action name="debit-process" class="com.example.bank.action.PaymentAction" method="debitProcess">
       <interceptor-ref name="apiWriteStack"><param name="apiGuardWrite.roles">SUPERVISOR</param></interceptor-ref>

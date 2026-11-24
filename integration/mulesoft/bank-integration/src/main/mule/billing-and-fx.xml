@@ -20,9 +20,13 @@
         <http:body><![CDATA[#[payload]]]></http:body>
         <http:headers><![CDATA[#[{ "Content-Type": "application/problem+json", "X-Request-ID": vars.requestId default "" }]]]></http:headers>
       </http:error-response>
+      <!-- 再送の再現では保存したステータス（200・422）を返す -->
+      <http:response statusCode="#[vars.httpStatus default 200]">
+        <http:headers><![CDATA[#[{ "X-Request-ID": vars.requestId default "", "Idempotent-Replayed": if (vars.replayed default false) "true" else "false" }]]]></http:headers>
+      </http:response>
     </http:listener>
-    <flow-ref name="begin-run"/>
     <set-variable variableName="runKind" value="BILLING_IMPORT"/>
+    <flow-ref name="begin-run" doc:name="実行を登録（冪等キー・行員トークン）"/>
     <ee:transform doc:name="CSV を読む">
       <ee:message><ee:set-payload><![CDATA[%dw 2.0 input payload application/csv header=true output application/java --- payload]]></ee:set-payload></ee:message>
     </ee:transform>
@@ -55,9 +59,13 @@ output application/json
         <http:body><![CDATA[#[payload]]]></http:body>
         <http:headers><![CDATA[#[{ "Content-Type": "application/problem+json", "X-Request-ID": vars.requestId default "" }]]]></http:headers>
       </http:error-response>
+      <!-- 再送の再現では保存したステータス（200・422）を返す -->
+      <http:response statusCode="#[vars.httpStatus default 200]">
+        <http:headers><![CDATA[#[{ "X-Request-ID": vars.requestId default "", "Idempotent-Replayed": if (vars.replayed default false) "true" else "false" }]]]></http:headers>
+      </http:response>
     </http:listener>
-    <flow-ref name="begin-run"/>
     <set-variable variableName="runKind" value="FX_RATES"/>
+    <flow-ref name="begin-run" doc:name="実行を登録（冪等キー・行員トークン）"/>
     <ee:transform doc:name="検証">
       <ee:variables><ee:set-variable variableName="fx"><![CDATA[%dw 2.0
 output application/java

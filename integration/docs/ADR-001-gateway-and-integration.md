@@ -1,5 +1,7 @@
 # ADR-001 API ゲートウェイ（Kong）と連携基盤（MuleSoft）の配置
 
+> 一部は [ADR-002](ADR-002-integration-hardening.md) で置き換えた（MuleSoft → 勘定系も Kong 経由、API キー → OAuth 2.0、実行履歴は Oracle）。
+
 - 状態：提案（デモ環境で実装・検証済み。本番採用には利害関係者の承認が必要）
 - 日付：2026-11-24
 

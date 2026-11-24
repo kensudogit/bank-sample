@@ -1,0 +1,10 @@
+# Railway：OAuth 2.0 トークン発行サーバー（社内ネットワークのみ。連携先へは Kong の /oauth2/token で公開する）
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "Dockerfile"
+
+[deploy]
+healthcheckPath = "/live"
+healthcheckTimeout = 60
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 5

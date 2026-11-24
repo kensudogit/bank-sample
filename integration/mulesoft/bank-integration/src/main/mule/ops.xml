@@ -1,40 +1,92 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
   運用：稼働状況（/health）、連携の実行履歴（/runs）と、各フロー共通の「実行の記録」。
-  実行履歴には件数・結果・Kong の利用者・要求 ID だけを残し、口座番号や氏名などの明細は残さない。
+  - 実行履歴は勘定系（Oracle）に保存する（integration-run-start / finish。再起動しても消えない）
+  - 冪等性：Idempotency-Key（なければ本文の SHA-256）で実行を登録し、完了済みの再送は保存した応答を返す（APP:REPLAY）。
+    処理中なら 409（APP:IN_PROGRESS）。勘定系の障害で失敗した実行は、同じキーの再送で再処理できる
+  - 行員 ID：Kong の利用者が bank-ops（連携コンソール）なら、署名付きの行員トークン（作成者・承認者・本文のハッシュ）を必須にする
+  実行履歴には件数・結果・利用者・要求 ID だけを残し、口座番号や氏名などの明細は残さない。
 -->
 <mule xmlns="http://www.mulesoft.org/schema/mule/core"
       xmlns:http="http://www.mulesoft.org/schema/mule/http"
-      xmlns:os="http://www.mulesoft.org/schema/mule/os"
       xmlns:ee="http://www.mulesoft.org/schema/mule/ee/core"
       xmlns:doc="http://www.mulesoft.org/schema/mule/documentation"
       xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
       xsi:schemaLocation="
         http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
         http://www.mulesoft.org/schema/mule/http http://www.mulesoft.org/schema/mule/http/current/mule-http.xsd
-        http://www.mulesoft.org/schema/mule/os http://www.mulesoft.org/schema/mule/os/current/mule-os.xsd
         http://www.mulesoft.org/schema/mule/ee/core http://www.mulesoft.org/schema/mule/ee/core/current/mule-ee.xsd">
 
-  <!-- 実行の開始：要求 ID（Kong の X-Request-ID）・利用者・開始時刻を変数に置く。
-       X-Bank-Operator（連携コンソールの行員）は Kong の利用者が bank-ops の場合だけ信用する -->
   <sub-flow name="begin-run">
     <set-variable variableName="requestId" value="#[attributes.headers['x-request-id'] default uuid()]"/>
-    <set-variable variableName="runId" value="#[uuid()]"/>
     <set-variable variableName="runStarted" value="#[now()]"/>
+    <!-- X-Consumer-Username は Kong が認証の結果として付ける（Kong 以外は mTLS で接続できない） -->
     <set-variable variableName="consumer" value="#[attributes.headers['x-consumer-username'] default 'internal']"/>
-    <set-variable variableName="operator"
-      value="#[if (vars.consumer == 'bank-ops') attributes.headers['x-bank-operator'] default null else null]"/>
+    <set-variable variableName="payloadSha256" doc:name="本文の SHA-256"
+      value="#[%dw 2.0 import * from dw::Crypto import toHex from dw::core::Binaries output application/java --- lower(toHex(hashWith(payload.^raw, 'SHA-256')))]"/>
+    <set-variable variableName="idempotencyKey"
+      value="#[attributes.headers['idempotency-key'] default ('sha256:' ++ vars.payloadSha256)]"/>
+    <set-variable variableName="operator" value="#[null]"/>
+    <set-variable variableName="approver" value="#[null]"/>
+    <choice doc:name="連携コンソールなら行員トークンを検証">
+      <when expression="#[vars.consumer == 'bank-ops']">
+        <ee:transform doc:name="行員トークン">
+          <ee:variables><ee:set-variable variableName="operatorClaims" resource="dw/operator-token.dwl"/></ee:variables>
+        </ee:transform>
+        <choice>
+          <when expression="#[vars.operatorClaims.error != null]">
+            <logger level="WARN" message="#[{ event: 'operator-token-rejected', requestId: vars.requestId, reason: vars.operatorClaims.error }]"/>
+            <raise-error type="APP:FORBIDDEN" description="行員の署名を確認できません（二者承認を経た送信だけを受け付けます）。"/>
+          </when>
+        </choice>
+        <set-variable variableName="operator" value="#[vars.operatorClaims.maker]"/>
+        <set-variable variableName="approver" value="#[vars.operatorClaims.approver]"/>
+        <set-variable variableName="idempotencyKey" value="#['approval:' ++ vars.operatorClaims.approvalId]"/>
+      </when>
+    </choice>
+    <set-variable variableName="originalPayload" value="#[payload]"/>
+    <set-variable variableName="corePath" value="/integration-run-start"/>
+    <set-payload value="#[output application/java --- { consumer: vars.consumer, kind: vars.runKind, idempotencyKey: vars.idempotencyKey,
+      payloadSha256: vars.payloadSha256, correlationId: vars.requestId, operator: vars.operator, approver: vars.approver }]"/>
+    <flow-ref name="core-post" doc:name="実行を登録"/>
+    <set-variable variableName="runId" value="#[payload.runId]"/>
+    <choice doc:name="冪等キーの判定">
+      <when expression="#[payload.state == 'REPLAY']">
+        <set-variable variableName="replayStatus" value="#[payload.httpStatus default 200]"/>
+        <set-variable variableName="replayBody" value="#[payload.response]"/>
+        <raise-error type="APP:REPLAY" description="完了済みの送信（保存した応答を返す）"/>
+      </when>
+      <when expression="#[payload.state == 'IN_PROGRESS']">
+        <raise-error type="APP:IN_PROGRESS" description="同じデータを処理中です。"/>
+      </when>
+    </choice>
+    <set-payload value="#[vars.originalPayload]"/>
   </sub-flow>
 
+  <!-- 正常終了：応答を保存して完了にする -->
   <sub-flow name="end-run">
-    <os:store key="#[vars.runId]" objectStore="Run_History_Store">
-      <os:value><![CDATA[#[output application/java --- {
-        runId: vars.runId, kind: vars.runKind, startedAt: vars.runStarted as String,
-        durationMs: (now() - vars.runStarted) as Number { unit: "milliseconds" },
-        outcome: vars.runOutcome, consumer: vars.consumer, operator: vars.operator,
-        requestId: vars.requestId, summary: vars.runSummary }]]]></os:value>
-    </os:store>
-    <logger level="INFO" message="#[output application/json --- { event: 'integration-run', runId: vars.runId, kind: vars.runKind, outcome: vars.runOutcome, consumer: vars.consumer, requestId: vars.requestId }]"/>
+    <set-variable variableName="responseBody" value="#[write(payload, 'application/json')]"/>
+    <set-variable variableName="finishRequest" value="#[output application/java --- { runId: vars.runId, status: 'COMPLETED',
+      outcome: vars.runOutcome, summary: vars.runSummary, httpStatus: '200', responseBody: vars.responseBody }]"/>
+    <flow-ref name="finish-run"/>
+    <set-payload value="#[vars.responseBody]" mimeType="application/json"/>
+  </sub-flow>
+
+  <!-- 実行の記録（失敗しても応答は返す。記録されなかった実行は期限切れ後に再処理できる） -->
+  <sub-flow name="finish-run">
+    <try>
+      <set-variable variableName="corePath" value="/integration-run-finish"/>
+      <set-payload value="#[vars.finishRequest]"/>
+      <flow-ref name="core-post"/>
+      <error-handler>
+        <on-error-continue type="ANY">
+          <logger level="ERROR" message="#[{ event: 'run-finish-failed', runId: vars.runId, requestId: vars.requestId }]"/>
+        </on-error-continue>
+      </error-handler>
+    </try>
+    <logger level="INFO" message="#[output application/json --- { event: 'integration-run', runId: vars.runId, kind: vars.runKind,
+      status: vars.finishRequest.status, outcome: vars.finishRequest.outcome, consumer: vars.consumer, operator: vars.operator,
+      approver: vars.approver, requestId: vars.requestId }]"/>
   </sub-flow>
 
   <flow name="health-flow" doc:name="GET /api/v1/health">
@@ -46,12 +98,24 @@
     </ee:transform>
   </flow>
 
+  <!-- 死活確認（平文のポート。Railway などのヘルスチェック用。業務 API は置かない） -->
+  <flow name="live-flow" doc:name="GET /live">
+    <http:listener config-ref="Admin_Listener" path="/live" allowedMethods="GET"/>
+    <set-payload value='#[output application/json --- { status: "UP" }]'/>
+  </flow>
+
   <flow name="runs-flow" doc:name="GET /api/v1/runs">
     <http:listener config-ref="Integration_Listener" path="/api/v1/runs" allowedMethods="GET"/>
-    <os:retrieve-all objectStore="Run_History_Store"/>
+    <set-variable variableName="requestId" value="#[attributes.headers['x-request-id'] default uuid()]"/>
+    <set-variable variableName="corePath" value="/integration-runs?limit=50"/>
+    <flow-ref name="core-get"/>
     <ee:transform>
       <ee:message><ee:set-payload><![CDATA[%dw 2.0 output application/json ---
-(valuesOf(payload) orderBy $.startedAt)[-1 to 0] default []]]></ee:set-payload></ee:message>
+payload map {
+  runId: $.runId, kind: $.kind, startedAt: $.startedAt, durationMs: $.durationMs default 0, status: $.status,
+  outcome: $.outcome default (if ($.status == "PROCESSING") "PROCESSING" else "FAILURE"), consumer: $.consumer,
+  operator: $.operator, approver: $.approver, requestId: $.requestId default "", summary: $.summary default "", attempts: $.attempts default 1
+}]]></ee:set-payload></ee:message>
     </ee:transform>
   </flow>
 </mule>

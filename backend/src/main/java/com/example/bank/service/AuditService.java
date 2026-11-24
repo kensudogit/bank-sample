@@ -106,8 +106,10 @@ public class AuditService {
      */
     public Map<String, Object> verify() {
         return Transactions.readOnly(dataSource.get(), c -> {
-            String expectedPrev = "0000000000000000000000000000000000000000000000000000000000000000";
-            long expectedId = 1;
+            // 保存期間を過ぎて削除した範囲があれば、その最後の行（起点）から検証する
+            String[] base = audit.base(c);
+            String expectedPrev = base[1];
+            long expectedId = Long.parseLong(base[0]) + 1;
             long checked = 0;
             Long brokenAt = null;
             String reason = null;
@@ -146,6 +148,18 @@ public class AuditService {
                 brokenAt = expectedId;
                 reason = "末尾の行が削除されています";
             }
+            // 日次のアンカー（その日の先頭の ID とハッシュ）と照合する。チェーンを丸ごと作り直す改ざんも、過去のアンカーと食い違う
+            if (brokenAt == null) {
+                for (String[] a : audit.anchorsAfter(c, Long.parseLong(base[0]))) {
+                    long id = Long.parseLong(a[1]);
+                    List<AuditEntry> row = audit.chunkAfter(c, id - 1, 1);
+                    if (row.isEmpty() || row.get(0).getAuditId() != id || !row.get(0).getRowHash().equals(a[2])) {
+                        brokenAt = id;
+                        reason = "日次のアンカー（" + a[0] + "）と一致しません";
+                        break;
+                    }
+                }
+            }
             Map<String, Object> m = new LinkedHashMap<>();
             m.put("valid", brokenAt == null);
             m.put("checked", checked);
@@ -153,6 +167,37 @@ public class AuditService {
             m.put("reason", reason);
             return m;
         });
+    }
+
+    /**
+     * 保存期間（audit_policy）を過ぎた行を古い順に削除する（夜間バッチ）。削除範囲の最後の行が新しい起点になり、
+     * 残りの行は引き続き検証できる。Oracle ではトリガーが期限内の行の削除を拒否する（14_audit_protection.sh）。
+     *
+     * @return 削除した行数
+     */
+    public int purgeExpired() {
+        return Transactions.inTransaction(dataSource.get(), c -> {
+            int days = ((Number) com.example.bank.repository.ProductRepository.query(c,
+                    "SELECT retention_days FROM audit_policy WHERE policy_id = 1").get(0).get("retentionDays")).intValue();
+            return audit.purgeBefore(c, LocalDateTime.now(clock).minusDays(days), 10000);
+        });
+    }
+
+    /**
+     * その日のチェーン先頭をアンカーとして記録し、アプリケーションログ（外部の保存先）にも出力する。
+     *
+     * @return 記録した ID とハッシュ（記録済みの日は null）
+     */
+    public Map<String, Object> anchor(LocalDate date) {
+        String[] head = Transactions.inTransaction(dataSource.get(), c -> audit.anchor(c, date, LocalDateTime.now(clock)));
+        if (head == null) return null;
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("date", date.toString());
+        m.put("lastId", Long.parseLong(head[0]));
+        m.put("lastHash", head[1]);
+        // ログはコンテナ基盤（Railway・docker）に集められ、DB とは別に保存される
+        LOG.info("{\"event\":\"audit-anchor\",\"date\":\"{}\",\"lastId\":{},\"lastHash\":\"{}\"}", date, head[0], head[1]);
+        return m;
     }
 
     // 列長を超える値を切り詰める

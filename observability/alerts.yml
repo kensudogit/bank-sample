@@ -1,0 +1,26 @@
+# 運用の警告（operations-runbook.md の一次対応と対応づける）
+groups:
+  - name: bank-integration
+    rules:
+      - alert: LibertyUpstreamUnhealthy
+        expr: min(kong_upstream_target_health{upstream="liberty.upstream", state="healthy"}) == 0
+        for: 1m
+        labels: { severity: critical }
+        annotations: { summary: "Kong から見て正常な Liberty がない（画面・連携が止まる）" }
+      - alert: IntegrationFailures
+        expr: sum(increase(mule_integration_runs_total{outcome="FAILURE"}[10m])) > 3
+        labels: { severity: warning }
+        annotations: { summary: "外部連携の失敗が 10 分で 3 件を超えた（勘定系の障害・入力不備）" }
+      - alert: CoreCallRetries
+        expr: sum(increase(mule_core_calls_total{result="retry"}[5m])) > 10
+        labels: { severity: warning }
+        annotations: { summary: "MuleSoft から勘定系への再試行が増えている" }
+      - alert: TokenFailures
+        expr: sum(increase(auth_token_failures_total[5m])) > 20
+        labels: { severity: warning }
+        annotations: { summary: "トークン発行の失敗が多い（シークレットの誤り・総当たりの疑い）" }
+      - alert: GatewayServerErrors
+        expr: sum(rate(kong_http_requests_total{code=~"5.."}[5m])) / clamp_min(sum(rate(kong_http_requests_total[5m])), 1) > 0.05
+        for: 5m
+        labels: { severity: warning }
+        annotations: { summary: "Kong の 5xx が 5% を超えた" }

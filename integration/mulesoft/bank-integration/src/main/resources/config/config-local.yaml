@@ -1,26 +1,37 @@
 # ローカル（docker compose）向けの設定。環境ごとに config-<env>.yaml を用意し、-Denv=<env> で切り替える。
-# パスワード類はこのファイルに書かない。core.password は実行時に -Dcore.password=... または
-# Secure Properties（暗号化した config-<env>.secure.yaml）で渡す。
+# パスワード・鍵類はこのファイルに書かない。core.password・operator.secret・tls.*.password は実行時に
+# -D... または Secure Properties（暗号化した config-<env>.secure.yaml）で渡す。
 http:
   listener:
     host: "0.0.0.0"
+    # 業務 API（HTTPS・クライアント証明書必須。Kong だけが接続できる）
+    tlsPort: "8443"
+    # 死活確認（/live）だけ
     port: "8081"
 
+tls:
+  # Kong → MuleSoft の mTLS。keystore：MuleSoft のサーバー証明書と鍵、truststore：社内 CA（Kong のクライアント証明書の発行元）
+  # integration/scripts/gen-secrets.sh の MULE_TLS_* と MTLS_CA_CERT から PKCS#12 を作る（operations-runbook.md）
+  keystore:
+    path: "tls/mule-server.p12"
+  truststore:
+    path: "tls/internal-ca.p12"
+
 core:
-  # 勘定系 API（Liberty）。社内ネットワークのロードバランサー（nginx）経由で呼ぶ。Kong は経由しない（二重の中継を避ける）
-  host: "lb"
-  port: "9080"
+  # 勘定系 API は Kong の社内ルートを通る（Liberty は Kong が付ける共有シークレットのない要求を拒否する）
+  host: "kong"
+  port: "8000"
+  hostHeader: "kong"
   basePath: "/bank/api"
   user: "svc-mule"
   # 1 回の呼び出しの上限（ミリ秒）
   responseTimeout: "15000"
+  # 接続失敗・5xx の再試行（呼ぶ API はすべて冪等）
+  retries: "2"
+  retryIntervalMs: "300"
 
 zengin:
   # 当行の銀行コード（被仕向データのうち、これ以外宛てのデータは取り込まない）
   ourBankCode: "9999"
   # 勘定系の被仕向入金 API に 1 回で送る件数（API 側の上限 100）
   chunkSize: "100"
-
-runs:
-  # 実行履歴の保持件数
-  keep: "50"
