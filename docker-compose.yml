@@ -85,10 +85,12 @@ services:
       retries: 10
       start_period: 20s
 
-  # Kong Gateway (OSS, DB-less). Declarative config: integration/kong/kong.yml.tmpl (API keys from .env at start-up)
+  # Kong Gateway (OSS, DB-less). Declarative config: integration/kong/kong.yml.tmpl (API keys from .env at start-up).
+  # Targets / internal host names default to this compose layout (KONG_LIBERTY_TARGETS / KONG_INTERNAL_HOSTS override them)
   kong:
-    image: kong:3.9.1
-    entrypoint: ["/bin/sh", "/kong/render-config.sh"]
+    build:
+      context: ./integration/kong
+    image: bank-sample-kong
     environment:
       KONG_DATABASE: "off"
       KONG_PROXY_LISTEN: 0.0.0.0:8000
@@ -107,9 +109,6 @@ services:
       KONG_KEY_BILLING: ${KONG_KEY_BILLING:?set KONG_KEY_BILLING in .env}
       KONG_KEY_FX: ${KONG_KEY_FX:?set KONG_KEY_FX in .env}
       KONG_KEY_OPS: ${KONG_KEY_OPS:?set KONG_KEY_OPS in .env}
-    volumes:
-      - ./integration/kong/kong.yml.tmpl:/kong/kong.yml.tmpl:ro
-      - ./integration/kong/render-config.sh:/kong/render-config.sh:ro
     ports:
       # Partner entry point (/integration/v1/*). The /bank/api routes only answer to Host: kong (frontend)
       - "127.0.0.1:${KONG_HOST_PORT:-8088}:8000"

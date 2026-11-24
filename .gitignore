@@ -6,3 +6,6 @@ frontend/.next/
 frontend/next-env.d.ts
 frontend/tsconfig.tsbuildinfo
 backend/bin/
+
+# Railway などの環境別の秘密情報（生成物）
+.env.*

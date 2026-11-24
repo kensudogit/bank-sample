@@ -176,5 +176,6 @@ if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
   });
   const port = Number(process.env.PORT ?? 8081);
   createServer(createApp({ core, ourBankCode: process.env.OUR_BANK_CODE ?? "9999" }))
-    .listen(port, "0.0.0.0", () => console.log(JSON.stringify({ event: "started", runtime: "mule-compat", port })));
+    // :: は IPv4 と IPv6 の両方で待ち受ける（Railway の社内ネットワークは IPv6 を含む）
+    .listen(port, process.env.HOST ?? "::", () => console.log(JSON.stringify({ event: "started", runtime: "mule-compat", port })));
 }

@@ -12,6 +12,8 @@
     <feature>sessionDatabase-1.0</feature>
   </featureManager>
 
+  <!-- HTTPS で公開する環境（Railway など）では環境変数 BANK_COOKIE_SECURE=true にし、セッション Cookie を HTTPS のみで送る -->
+  <variable name="BANK_COOKIE_SECURE" defaultValue="false"/>
   <httpEndpoint id="defaultHttpEndpoint" host="*" httpPort="9080" httpsPort="-1"/>
 
   <!-- Oracle JDBC driver (copied by the Dockerfile from the Gradle 'copyJdbcDriver' task) -->
@@ -44,7 +46,7 @@
   <!--
     Login session cookie: HttpOnly (not readable by scripts), SameSite=Lax (not sent on cross-site POSTs),
     path "/" so the browser also sends it through the Next.js proxy (/api/bank/*).
-    Set cookieSecure="true" once the site is served over HTTPS.
+    Set BANK_COOKIE_SECURE=true once the site is served over HTTPS (Railway).
   -->
   <!--
     Session persistence (high availability): sessions are written to the BANK schema (table created by Liberty) at the
@@ -65,7 +67,7 @@
                        writeContents="ONLY_UPDATED_ATTRIBUTES" tableName="BANK_HTTP_SESSIONS"/>
 
   <httpSession storageRef="sessionDB" cookieName="BANKSESSION" cookieHttpOnly="true" cookieSameSite="Lax" cookiePath="/"
-               cookieSecure="false"/>
+               cookieSecure="${BANK_COOKIE_SECURE}"/>
 
   <applicationManager autoExpand="true"/>
   <!-- Do not reveal server details in error pages / headers -->

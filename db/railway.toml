@@ -1,0 +1,8 @@
+# Railway：Oracle Database。データはボリューム（/opt/oracle/oradata）に置く。HTTP の死活確認は無い
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "Dockerfile"
+
+[deploy]
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 5

@@ -22,9 +22,8 @@ upstreams:
       passive:
         healthy: { successes: 3 }
         unhealthy: { tcp_failures: 2, timeouts: 3, http_failures: 3, http_statuses: [502, 503, 504] }
-    targets:
-      - target: bank-sample-liberty-1:9080
-      - target: bank-sample-liberty-2:9080
+    # 既定は docker compose の 2 台。Railway などでは KONG_LIBERTY_TARGETS（カンマ区切り）で指定する
+    targets: __LIBERTY_TARGETS__
 
 services:
   # ---------------- 勘定系 API（画面用） ----------------
@@ -40,16 +39,16 @@ services:
     routes:
       # ログインは IP ごとに厳しく制限する（Liberty 側の 5 回失敗ロックに加えた総当たり対策）
       - name: bank-core-login
-        hosts: ["kong", "kong:8000"]
+        hosts: __INTERNAL_HOSTS__
         paths: ["/bank/api/login"]
         strip_path: false
         methods: ["POST"]
         plugins:
           - name: rate-limiting
             config: { minute: 20, limit_by: ip, policy: local, hide_client_headers: false }
-      # 画面からの API。Host: kong（社内のフロントエンドだけが使う名前）に限り、外向けの 8088 からは呼べない
+      # 画面からの API。社内の名前（KONG_INTERNAL_HOSTS。既定 kong / kong:8000）に限り、外向けの入口からは呼べない
       - name: bank-core-api
-        hosts: ["kong", "kong:8000"]
+        hosts: __INTERNAL_HOSTS__
         paths: ["/bank/api"]
         strip_path: false
         plugins:
@@ -60,7 +59,7 @@ services:
 
   # ---------------- 外部連携（MuleSoft Process API） ----------------
   - name: integration-zengin
-    url: http://mule:8081/api/v1/zengin
+    url: http://__MULE_HOST__:8081/api/v1/zengin
     read_timeout: 60000
     routes:
       - name: integration-zengin
@@ -78,7 +77,7 @@ services:
         config: { allowed_payload_size: 5, size_unit: megabytes }
 
   - name: integration-billing
-    url: http://mule:8081/api/v1/billing
+    url: http://__MULE_HOST__:8081/api/v1/billing
     read_timeout: 60000
     routes:
       - name: integration-billing
@@ -96,7 +95,7 @@ services:
         config: { allowed_payload_size: 5, size_unit: megabytes }
 
   - name: integration-fx
-    url: http://mule:8081/api/v1/fx
+    url: http://__MULE_HOST__:8081/api/v1/fx
     routes:
       - name: integration-fx
         paths: ["/integration/v1/fx"]
@@ -112,9 +111,20 @@ services:
       - name: request-size-limiting
         config: { allowed_payload_size: 64, size_unit: kilobytes }
 
+  # ゲートウェイ自体の死活（Railway などのヘルスチェック用。上流へは転送しない）
+  - name: gateway-health
+    url: http://127.0.0.1:65535
+    routes:
+      - name: gateway-health
+        paths: ["/gateway-health"]
+        methods: ["GET"]
+    plugins:
+      - name: request-termination
+        config: { status_code: 200, message: "ok" }
+
   # 稼働状況：API キーがあれば誰でも（連携先の疎通確認用）
   - name: integration-health
-    url: http://mule:8081/api/v1/health
+    url: http://__MULE_HOST__:8081/api/v1/health
     routes:
       - name: integration-health
         paths: ["/integration/v1/health"]
@@ -126,7 +136,7 @@ services:
 
   # 実行履歴：銀行の運用（連携コンソール）だけ
   - name: integration-runs
-    url: http://mule:8081/api/v1/runs
+    url: http://__MULE_HOST__:8081/api/v1/runs
     routes:
       - name: integration-runs
         paths: ["/integration/v1/runs"]
