@@ -32,6 +32,8 @@ services:
       - "127.0.0.1:${ORACLE_HOST_PORT:-1521}:1521"
     volumes:
       - ./db/init:/container-entrypoint-initdb.d:ro
+      # 起動のたびに未適用の移行を適用する（作成済みの DB 向け。適用済みなら何もしない）
+      - ./db/startdb:/container-entrypoint-startdb.d:ro
       - oracle-data:/opt/oracle/oradata
     networks: [core]
     restart: unless-stopped

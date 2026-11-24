@@ -42,11 +42,9 @@ Oracle は `db/**` を変えたときだけ再起動し、データはボリュ�
 
 ## 既存の DB への移行
 
-`db/init` の SQL は Oracle の初回作成時にだけ実行されます。作成済みの DB には、oracle の再デプロイ（`db/**` の変更）後に一度だけ適用します。
-
-```bash
-bash deploy/railway.sh migrate    # 13_integration_hardening.sql（表）と 14_audit_protection.sh（監査ログの保護）
-```
+`db/init` の SQL は Oracle の初回作成時にだけ実行されます。作成済みの DB には、起動のたびに動く `db/startdb/10_integration_hardening.sh` が
+未適用の `13_integration_hardening.sql`（表）と `14_audit_protection.sh`（監査ログの保護）を一度だけ適用します（適用済みなら何もしない）。
+oracle の再デプロイ（`db/**` の変更、または Redeploy）で反映されます。SSH キーを登録済みなら `bash deploy/railway.sh migrate` でも適用できます。
 
 ## 注意
 
