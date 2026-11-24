@@ -27,6 +27,24 @@ docker compose の nginx（lb）は使いません（公開は Railway、Liberty
    Windows の Git Bash では `MSYS_NO_PATHCONV=1 bash deploy/railway.sh`（`/opt/...` や `/dev/stdout` を Windows のパスに書き換えさせない）
 4. Oracle の初回作成（数分）が終わると liberty が DB に接続し、画面からログインできる
 
+## GitHub からの自動デプロイ
+
+5 つのサービスは GitHub（`kensudogit/bank-sample` の `main`）に接続されており、push のたびに Railway がビルドします。
+サービスごとの設定（ルートディレクトリ・Dockerfile・監視パス・ヘルスチェック）は `.railway/railway.ts` で管理し、
+変更したファイルが監視パスに合うサービスだけが再ビルドされます（例：`frontend/**` の変更では frontend だけ。
+Oracle は `db/**` を変えたときだけ再起動し、データはボリュームに残る）。
+
+`.railway/railway.ts` を変えたら、PowerShell で次のように確認・反映します（変数は `preserve()` なので値は変わりません）。
+
+```powershell
+npm install --no-save railway
+$env:_ = "$env:APPDATA\npm\node_modules\@railway\cli\bin\railway.exe"
+& $env:_ config plan    # 変更内容の確認（Railway は変更しない）
+& $env:_ config apply   # 反映
+```
+
+Git Bash では、SDK が CLI を見つけられないため（`_` 環境変数が上書きされる）PowerShell で実行してください。
+
 ## 注意
 
 - デモユーザーのパスワードは README に公開されています（`BankDemo#2026`）。公開 URL では誰でもログインできるため、

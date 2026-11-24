@@ -9,3 +9,6 @@ backend/bin/
 
 # Railway などの環境別の秘密情報（生成物）
 .env.*
+
+# Railway の構成コード（.railway/railway.ts）の実行用 SDK（npm install --no-save railway）
+/node_modules/
