@@ -1,0 +1,166 @@
+# Kong Gateway（OSS 3.9・DB-less）の宣言的設定。起動時に render-config.sh が __KEY_*__ を .env の値に置き換えて
+# /tmp/kong.yml を作る（API キーをリポジトリに書かない）。
+#
+#   ブラウザ → lb:3000 → frontend ×2 →（Host: kong）kong:8000 /bank/api/*  → liberty ×2（Kong がヘルスチェック付きで負荷分散）
+#   他行・収納企業・相場提供元 → 127.0.0.1:8088 /integration/v1/*（API キー＋ACL）→ mule:8081 /api/v1/*（MuleSoft）→ lb:9080 → liberty
+#
+# 本番では key-auth の代わりに OAuth2 クライアント認証・mTLS を使い、鍵は Vault 等で管理する（integration/docs/security-design.md）。
+_format_version: "3.0"
+_transform: true
+
+upstreams:
+  # 勘定系 API（WebSphere Liberty ×2）。能動（/health）と受動（接続失敗・5xx）の両方で異常な台を外す
+  - name: liberty.upstream
+    algorithm: round-robin
+    healthchecks:
+      active:
+        type: http
+        http_path: /bank/api/health
+        timeout: 2
+        healthy: { interval: 5, successes: 2 }
+        unhealthy: { interval: 5, http_failures: 2, tcp_failures: 2, timeouts: 2, http_statuses: [500, 502, 503, 504] }
+      passive:
+        healthy: { successes: 3 }
+        unhealthy: { tcp_failures: 2, timeouts: 3, http_failures: 3, http_statuses: [502, 503, 504] }
+    targets:
+      - target: bank-sample-liberty-1:9080
+      - target: bank-sample-liberty-2:9080
+
+services:
+  # ---------------- 勘定系 API（画面用） ----------------
+  - name: bank-core-api
+    host: liberty.upstream
+    port: 9080
+    protocol: http
+    connect_timeout: 1000
+    read_timeout: 30000
+    write_timeout: 30000
+    # 接続失敗時のみ別の台で再試行する（更新系は冪等キー付きなので、届いていた場合も二重実行されない）
+    retries: 2
+    routes:
+      # ログインは IP ごとに厳しく制限する（Liberty 側の 5 回失敗ロックに加えた総当たり対策）
+      - name: bank-core-login
+        hosts: ["kong", "kong:8000"]
+        paths: ["/bank/api/login"]
+        strip_path: false
+        methods: ["POST"]
+        plugins:
+          - name: rate-limiting
+            config: { minute: 20, limit_by: ip, policy: local, hide_client_headers: false }
+      # 画面からの API。Host: kong（社内のフロントエンドだけが使う名前）に限り、外向けの 8088 からは呼べない
+      - name: bank-core-api
+        hosts: ["kong", "kong:8000"]
+        paths: ["/bank/api"]
+        strip_path: false
+        plugins:
+          - name: rate-limiting
+            config: { minute: 1200, limit_by: ip, policy: local }
+          - name: request-size-limiting
+            config: { allowed_payload_size: 1, size_unit: megabytes }
+
+  # ---------------- 外部連携（MuleSoft Process API） ----------------
+  - name: integration-zengin
+    url: http://mule:8081/api/v1/zengin
+    read_timeout: 60000
+    routes:
+      - name: integration-zengin
+        paths: ["/integration/v1/zengin"]
+        strip_path: true
+        methods: ["POST"]
+    plugins:
+      - name: key-auth
+        config: { key_names: ["apikey"], hide_credentials: true }
+      - name: acl
+        config: { allow: ["zengin-network", "bank-ops"], hide_groups_header: true }
+      - name: rate-limiting
+        config: { minute: 30, limit_by: consumer, policy: local }
+      - name: request-size-limiting
+        config: { allowed_payload_size: 5, size_unit: megabytes }
+
+  - name: integration-billing
+    url: http://mule:8081/api/v1/billing
+    read_timeout: 60000
+    routes:
+      - name: integration-billing
+        paths: ["/integration/v1/billing"]
+        strip_path: true
+        methods: ["POST"]
+    plugins:
+      - name: key-auth
+        config: { key_names: ["apikey"], hide_credentials: true }
+      - name: acl
+        config: { allow: ["billing-agency", "bank-ops"], hide_groups_header: true }
+      - name: rate-limiting
+        config: { minute: 30, limit_by: consumer, policy: local }
+      - name: request-size-limiting
+        config: { allowed_payload_size: 5, size_unit: megabytes }
+
+  - name: integration-fx
+    url: http://mule:8081/api/v1/fx
+    routes:
+      - name: integration-fx
+        paths: ["/integration/v1/fx"]
+        strip_path: true
+        methods: ["POST"]
+    plugins:
+      - name: key-auth
+        config: { key_names: ["apikey"], hide_credentials: true }
+      - name: acl
+        config: { allow: ["fx-provider", "bank-ops"], hide_groups_header: true }
+      - name: rate-limiting
+        config: { minute: 60, limit_by: consumer, policy: local }
+      - name: request-size-limiting
+        config: { allowed_payload_size: 64, size_unit: kilobytes }
+
+  # 稼働状況：API キーがあれば誰でも（連携先の疎通確認用）
+  - name: integration-health
+    url: http://mule:8081/api/v1/health
+    routes:
+      - name: integration-health
+        paths: ["/integration/v1/health"]
+        strip_path: true
+        methods: ["GET"]
+    plugins:
+      - name: key-auth
+        config: { key_names: ["apikey"], hide_credentials: true }
+
+  # 実行履歴：銀行の運用（連携コンソール）だけ
+  - name: integration-runs
+    url: http://mule:8081/api/v1/runs
+    routes:
+      - name: integration-runs
+        paths: ["/integration/v1/runs"]
+        strip_path: true
+        methods: ["GET"]
+    plugins:
+      - name: key-auth
+        config: { key_names: ["apikey"], hide_credentials: true }
+      - name: acl
+        config: { allow: ["bank-ops"], hide_groups_header: true }
+
+# 全ルート共通：要求 ID（X-Request-ID）の付与と応答への返却、Prometheus 指標（ステータス用ポート 8100 の /metrics）
+plugins:
+  - name: correlation-id
+    config: { header_name: X-Request-ID, generator: uuid, echo_downstream: true }
+  - name: prometheus
+    config: { status_code_metrics: true, latency_metrics: true, upstream_health_metrics: true, per_consumer: true }
+
+# 連携先（API の利用者）。グループ（ACL）で呼べる API を限定する
+consumers:
+  - username: zengin-network
+    custom_id: partner-zengin
+    keyauth_credentials: [{ key: "__KEY_ZENGIN__" }]
+    acls: [{ group: zengin-network }]
+  - username: billing-agency
+    custom_id: partner-billing
+    keyauth_credentials: [{ key: "__KEY_BILLING__" }]
+    acls: [{ group: billing-agency }]
+  - username: fx-provider
+    custom_id: partner-fx
+    keyauth_credentials: [{ key: "__KEY_FX__" }]
+    acls: [{ group: fx-provider }]
+  # 銀行の運用（画面の連携コンソールからサーバー側で使う。ブラウザには鍵を渡さない）
+  - username: bank-ops
+    custom_id: internal-ops
+    keyauth_credentials: [{ key: "__KEY_OPS__" }]
+    acls: [{ group: bank-ops }]

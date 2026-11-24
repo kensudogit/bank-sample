@@ -1,5 +1,7 @@
 "use client";
 
+// 残高証明書の画面（/accounts/[accountNo]/certificate）。指定日の終わりの残高を表示し、ブラウザの印刷機能で証明書として出力する。
+
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import { useEffect, useState } from "react";
@@ -15,6 +17,7 @@ export default function CertificatePage() {
   const [data, setData] = useState<Row | null>(null);
   const [error, setError] = useState<unknown>(null);
 
+  // 日付を素早く切り替えたとき、古いリクエストの結果で上書きしないよう alive フラグで捨てる
   useEffect(() => {
     let alive = true;
     setError(null);
@@ -24,6 +27,7 @@ export default function CertificatePage() {
 
   return (
     <>
+      {/* 操作部分（戻るリンク・日付・印刷ボタン）は印刷時に出さない */}
       <div className="no-print">
         <Link href={`/accounts/${accountNo}`} className="back-link"><IconArrowLeft size={16} /> 口座 {accountNo}</Link>
         <div className="page-head">
@@ -62,6 +66,7 @@ export default function CertificatePage() {
   );
 }
 
+/** yyyy-MM-dd を証明書向けの「yyyy年M月d日」表記にする。 */
 function formatDate(iso: string): string {
   const [y, m, d] = iso.split("-");
   return `${y}年${Number(m)}月${Number(d)}日`;

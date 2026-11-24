@@ -1,0 +1,9 @@
+{
+  "provider": "DEMO-FX",
+  "asOf": "2026-11-24T09:55:00+09:00",
+  "rates": [
+    { "currency": "USD", "mid": "152.30", "spread": "1.00" },
+    { "currency": "EUR", "mid": "163.10", "spread": "1.50" },
+    { "currency": "GBP", "mid": "190.00", "spread": "2.00" }
+  ]
+}

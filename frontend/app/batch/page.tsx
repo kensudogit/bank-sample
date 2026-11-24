@@ -1,5 +1,8 @@
 "use client";
 
+// 銀行バッチの画面（/batch、管理者専用）。夜間バッチの業務一覧と直近結果（失敗時の再実行）、
+// 業務日ごとの照合結果・取引集計・総勘定元帳日計・利息計上・手数料照合、月末締めの状況、帳票 CSV のダウンロードを行う。
+
 import { useState } from "react";
 import { RequireRole } from "@/components/AuthProvider";
 import { ErrorBox, Loading, SuccessBox } from "@/components/Feedback";
@@ -8,6 +11,7 @@ import { batchApi, useBatchCatalog, useBatchDaily, useMonthCloses, useReportOutp
 import { formatDate, formatDateTime, formatNumber, formatYen, todayIso, txTypeLabel } from "@/lib/format";
 
 /** 銀行バッチ：業務一覧（直近の結果・失敗の再実行）、日次の結果（集計・利息・手数料・照合・元帳）、月末締め、帳票出力。 */
+// 4 つのタブ（業務一覧・日次の結果・月末締め・帳票出力）で切り替える
 export default function BatchPage() {
   const [tab, setTab] = useState<"catalog" | "daily" | "month" | "reports">("catalog");
   return (
@@ -32,6 +36,7 @@ export default function BatchPage() {
   );
 }
 
+/** ジョブの直近結果（成功・失敗・実行中・未実行）をバッジで表示する。 */
 function Outcome({ last }: { last: Row | null }) {
   if (!last) return <span className="muted">未実行</span>;
   const cls = last.outcome === "SUCCESS" ? "badge-SUCCESS" : last.outcome === "FAILURE" ? "badge-FAILURE" : "badge-PENDING";
@@ -39,12 +44,14 @@ function Outcome({ last }: { last: Row | null }) {
   return <span className={`badge ${cls}`}>{label}</span>;
 }
 
+/** 業務一覧：業務ごとのジョブ、実行タイミング、直近の結果。失敗したジョブはその業務日で再実行できる。 */
 function Catalog() {
   const { data, error } = useBatchCatalog();
   const [msg, setMsg] = useState<string | null>(null);
   const [err, setErr] = useState<unknown>(null);
   const [busy, setBusy] = useState(false);
 
+  // ボタン共通の実行ヘルパー。busy の間は二重に実行しない。
   const act = async (fn: () => Promise<unknown>, done: (r: any) => string) => {
     if (busy) return;
     setBusy(true);
@@ -60,6 +67,7 @@ function Catalog() {
   };
 
   if (!data) return error ? <ErrorBox error={error} /> : <Loading />;
+  // ジョブ 1 件分の表示（業務一覧と「そのほかの夜間ジョブ」で共通）
   const jobRow = (j: Row, key: string) => (
     <div key={key} className="job-line">
       <span><strong>{j.label}</strong> <code className="muted">{j.name}</code></span>
@@ -111,6 +119,7 @@ function Catalog() {
   );
 }
 
+/** 前日の日付（yyyy-MM-dd）。日次バッチは前日分を処理するため、業務日の既定値に使う。 */
 function yesterday(): string {
   const d = new Date(`${todayIso()}T00:00:00`);
   d.setDate(d.getDate() - 1);
@@ -118,11 +127,13 @@ function yesterday(): string {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
 }
 
+/** 日次の結果：選んだ業務日のバッチ結果（照合・集計・元帳・利息・手数料）を表示する。 */
 function Daily() {
   const [date, setDate] = useState(yesterday());
   const { data, error, loading } = useBatchDaily(date);
   const checks: Row[] = data?.checks ?? [];
   const ledger: Row[] = data?.ledger ?? [];
+  // 総勘定元帳の借方・貸方の合計（一致していれば貸借が合っている）
   const dr = ledger.reduce((s, r) => s + Number(r.debit), 0);
   const cr = ledger.reduce((s, r) => s + Number(r.credit), 0);
   return (
@@ -211,9 +222,12 @@ function Daily() {
   );
 }
 
+/** 照合の区分 → 日本語表示名 */
 const groupLabel: Record<string, string> = { FEE: "手数料", REMITTANCE: "為替照合", LEDGER: "会計照合" };
+/** 利息計上の対象となる預金種類 → 日本語表示名 */
 const typeLabel: Record<string, string> = { ORDINARY: "普通", SAVINGS: "貯蓄", NOTICE: "通知", TIME: "定期" };
 
+/** 月末締めの一覧。照合 NG が残る月は「例外」として表示する。 */
 function MonthCloses() {
   const { data, error } = useMonthCloses();
   if (!data) return error ? <ErrorBox error={error} /> : <Loading />;
@@ -245,13 +259,16 @@ function MonthCloses() {
   );
 }
 
+/** バッチが作成する帳票の種類 → 日本語表示名 */
 const reportLabel: Record<string, string> = {
   TX_JOURNAL: "取引明細表", DAILY_BALANCE: "日計表", MONTH_BALANCES: "月末残高一覧", MONTH_SUMMARY: "月次集計表",
 };
 
+/** 帳票出力の一覧と CSV ダウンロード（ダウンロードはサーバー側で監査ログに記録される）。 */
 function Reports() {
   const { data, error } = useReportOutputs();
   const [err, setErr] = useState<unknown>(null);
+  // 一覧には本文を含めず、ダウンロード時に 1 件分の本文を取得して Blob としてダウンロードさせる
   const download = async (r: Row) => {
     setErr(null);
     try {

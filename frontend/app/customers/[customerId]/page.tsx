@@ -1,5 +1,8 @@
 "use client";
 
+// 顧客詳細の画面（/customers/[customerId]、行員専用）。顧客の基本情報と本人確認の判定、
+// 口座開設、オンラインバンキングのログイン発行、保有口座の一覧、顧客 360 度ビュー（CRM）を表示する。
+
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import { useState } from "react";
@@ -23,6 +26,7 @@ import {
 } from "@/lib/format";
 import type { Account, AccountType, Customer } from "@/lib/types";
 
+/** 顧客詳細ページ。窓口担当・管理者のみ利用できる。 */
 export default function CustomerDetailPage() {
   return (
     <RequireRole roles={["TELLER", "SUPERVISOR"]}>
@@ -31,6 +35,7 @@ export default function CustomerDetailPage() {
   );
 }
 
+/** 顧客詳細の本体。本人確認の状態（確認待ち・確認済・謝絶）によって表示する操作を変える。 */
 function CustomerDetail() {
   const { user } = useAuth();
   const { customerId } = useParams<{ customerId: string }>();
@@ -96,6 +101,7 @@ function CustomerDetail() {
         {customer.kycNote && <p className="section-note" style={{ marginTop: 12 }}>備考: {customer.kycNote}</p>}
       </section>
 
+      {/* 本人確認の判定は役席のみ（受付者とは別の役席が判定する職務分離はサーバー側で確認） */}
       {customer.kycStatus === "PENDING" &&
         (user?.role === "SUPERVISOR" ? (
           <KycDecision customer={customer} />
@@ -114,6 +120,7 @@ function CustomerDetail() {
   );
 }
 
+/** 本人確認の判定フォーム（確認済／謝絶）。謝絶の場合は備考に理由が必須（サーバー側で確認）。 */
 function KycDecision({ customer }: { customer: Customer }) {
   const [note, setNote] = useState("");
   const [submitting, setSubmitting] = useState(false);
@@ -198,6 +205,7 @@ function IssueLogin({ customer }: { customer: Customer }) {
   );
 }
 
+/** 口座開設フォーム。冪等キーで二重開設を防ぎ、成功後は次の開設用にキーを作り直す。 */
 function OpenAccountForm({ customer }: { customer: Customer }) {
   const [accountType, setAccountType] = useState<AccountType>("ORDINARY");
   const [deposit, setDeposit] = useState("");
@@ -206,6 +214,7 @@ function OpenAccountForm({ customer }: { customer: Customer }) {
   const [error, setError] = useState<unknown>(null);
   const [opened, setOpened] = useState<Account | null>(null);
 
+  // 解約済みを除いて、すでに保有している口座種別
   const held = new Set(customer.accounts.filter((a) => a.status !== "CLOSED").map((a) => a.accountType));
   const [currency, setCurrency] = useState("USD");
   // One account per type (per currency for foreign deposits); checking accounts for corporate customers only
@@ -217,6 +226,7 @@ function OpenAccountForm({ customer }: { customer: Customer }) {
     ? accountType
     : (available[0] ?? accountType);
 
+  // 外貨預金は残高 0 で開設し、入金は円口座からの両替で行う
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (submitting) return;
@@ -293,6 +303,7 @@ function OpenAccountForm({ customer }: { customer: Customer }) {
   );
 }
 
+/** 顧客の保有口座の一覧（口座番号にマウスを乗せると口座詳細を先読みする）。 */
 function AccountList({ accounts }: { accounts: Account[] }) {
   return (
     <section className="card table-wrap">
@@ -335,6 +346,7 @@ function AccountList({ accounts }: { accounts: Account[] }) {
   );
 }
 
+/** 接触履歴の種類 → 日本語表示名 */
 const noteTypeLabel: Record<string, string> = { VISIT: "訪問", CALL: "電話", PROPOSAL: "提案", COMPLAINT: "苦情", MEMO: "メモ" };
 
 /** 顧客 360°（CRM）: 預かり資産・融資・定期・口座振替・AML・接触履歴。 */
@@ -345,6 +357,7 @@ function Customer360({ customerId }: { customerId: string }) {
   const [err, setErr] = useState<unknown>(null);
   if (!data) return error ? <ErrorBox error={error} /> : null;
 
+  // 接触履歴（訪問・電話・提案など）を記録する。記録後はキャッシュ無効化により一覧が再取得される。
   const addNote = async (e: React.FormEvent) => {
     e.preventDefault();
     setErr(null);
@@ -400,6 +413,7 @@ function Customer360({ customerId }: { customerId: string }) {
         </div>
       </div>
 
+      {/* 接触履歴の入力フォームと一覧 */}
       <h3 style={{ marginTop: 20 }}>接触履歴</h3>
       <ErrorBox error={err} />
       <form className="filters" onSubmit={addNote}>

@@ -1,5 +1,8 @@
 "use client";
 
+// 振込・振替の画面（/transfer）。入力 → 確認 → 完了の 3 ステップで、同一行内の口座間の資金移動を行う。
+// 顧客は自分の口座から選び、行員は口座番号を直接入力する。
+
 import Link from "next/link";
 import { useEffect, useState } from "react";
 import { useAuth } from "@/components/AuthProvider";
@@ -8,10 +11,12 @@ import { ApiError, bankApi, newIdempotencyKey, prefetchAccountDetail, useAccount
 import { formatDateTime, formatYen, normalizeAmount } from "@/lib/format";
 import type { OperationResult } from "@/lib/types";
 
+/** 画面のステップ：入力・確認・完了 */
 type Step = "input" | "confirm" | "done";
 /** 振込: 任意の口座へ / 振替: 同じ名義の口座間 */
 type Kind = "transfer" | "own";
 
+/** 振込・振替ページ。冪等キーにより、確認画面で二重に実行ボタンを押しても 1 回しか送金されない。 */
 export default function TransferPage() {
   const { user } = useAuth();
   // Customers: only their own accounts come back. Staff: used for input suggestions only.
@@ -46,6 +51,7 @@ export default function TransferPage() {
   // 振替先: 振込元と同じ名義の利用可能な口座
   const ownTargets = active.filter((a) => fromAccount && a.customerId === fromAccount.customerId && a.accountNo !== from);
 
+  // 確認画面に進む前に、口座番号の桁数・同一口座・金額の形式を画面側でも検査する（最終的な検査はサーバー側）
   const toConfirm = (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
@@ -56,6 +62,7 @@ export default function TransferPage() {
     setStep("confirm");
   };
 
+  // 実行。失敗したら入力画面に戻す。DUPLICATE_REQUEST（同じキーで処理済み）の場合は次の操作用にキーを作り直す。
   const execute = async () => {
     if (submitting) return;
     setSubmitting(true);
@@ -80,6 +87,7 @@ export default function TransferPage() {
     }
   };
 
+  // 「続けて振込」：口座の選択は残し、金額などを消して新しい冪等キーで始め直す
   const reset = () => {
     setTo("");
     setAmount("");
@@ -120,6 +128,7 @@ export default function TransferPage() {
                   onChange={(e) => setFrom(normalizeAmount(e.target.value))} placeholder="1000001" />
               )}
             </label>
+            {/* 顧客の振替は、同じ名義の口座だけをプルダウンで選ばせる */}
             {kind === "own" && isCustomer ? (
               <label>
                 振替先口座
@@ -175,6 +184,7 @@ export default function TransferPage() {
         </section>
       )}
 
+      {/* 確認画面：実行前に内容を表示する */}
       {step === "confirm" && (
         <section className="card confirm">
           <h2>{label}内容の確認</h2>
@@ -203,6 +213,7 @@ export default function TransferPage() {
         </section>
       )}
 
+      {/* 完了画面：明細へのリンクは先読みしておき、すぐに表示できるようにする */}
       {step === "done" && result && (
         <section className="card confirm">
           <SuccessBox>{label}が完了しました。</SuccessBox>

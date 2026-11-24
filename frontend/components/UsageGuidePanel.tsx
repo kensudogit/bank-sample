@@ -1,5 +1,8 @@
 "use client";
 
+// 画面右下に浮かぶ「利用手順」パネル。アプリの構成・役割・試し方・トラブル対処・機能ごとの手順を表示する。
+// 本文の内容はこのファイル内の定数で管理し、開閉状態はブラウザ（localStorage）に保存する。
+
 import { useCallback, useEffect, useRef, useState } from "react";
 import styles from "./UsageGuidePanel.module.css";
 
@@ -8,6 +11,7 @@ import styles from "./UsageGuidePanel.module.css";
  * 見出しをドラッグで移動、▼▲ で本文の開閉、× または Esc で閉じる。画面を移動しても開いたまま。
  */
 
+/** 使用技術のタグ一覧（パネル上部に表示） */
 const techStack = [
   "Next.js 15 · React 19",
   "Struts 2 · Liberty",
@@ -17,6 +21,7 @@ const techStack = [
   "監査ハッシュチェーン",
 ] as const;
 
+/** サービス構成図（等幅フォントの <pre> でそのまま表示するテキスト図） */
 const archDiagram = `ブラウザ（この画面）
     │ :3000
     ▼
@@ -32,6 +37,7 @@ Oracle 23ai（スキーマ BANK）
     ├ 監査ログ（ハッシュチェーン）
     └ 夜間バッチの実行記録（1 日 1 回）`;
 
+/** 「5 分で一通り試す」の手順 */
 const quickFlow = [
   "supervisor1 でログイン（パスワード BankDemo#2026）",
   "「口座一覧」で 1000001 を開き、入金 10,000 円 → 取引履歴に反映されることを確認",
@@ -40,12 +46,14 @@ const quickFlow = [
   "「業務処理」で夜間バッチの結果を確認し、「監査ログ」で改ざん検知を実行",
 ] as const;
 
+/** デモ用の利用者 ID・役割・できることの表 */
 const roles = [
   ["yamada / sato / suzuki / takahashi", "お客さま", "本人名義の口座の照会・履歴・利息見込み、振込・振替"],
   ["teller1", "窓口担当", "全口座の照会、入金・出金、口座開設の申込受付・開設、顧客ログインの発行、顧客分析"],
   ["supervisor1 / supervisor2", "役席", "窓口の操作 + 本人確認の判定、解約、休眠解除、利息決算、リスク・AML・業務処理・監査ログ、経営ダッシュボード・帳票"],
 ] as const;
 
+/** 運用のルール：やってよいこと／やらないこと */
 const doList = [
   "画面の「確認」まで進んでから確定する（確定ボタンの二度押しは冪等キーで 1 回だけ処理）",
   "本人確認・融資の承認は、申込を受け付けた人とは別の役席で行う",
@@ -58,6 +66,7 @@ const dontList = [
   "DB の残高を SQL で直接書き換えない（取引元帳の整合性検証でジョブが失敗する）",
 ] as const;
 
+/** うまくいかないときの確認事項 */
 const troubles = [
   "ログイン画面に戻される：15 分無操作でタイムアウト。もう一度ログイン",
   "「この画面を利用する権限がありません」：役割が足りない（ADMIN メニューは役席のみ）",
@@ -66,6 +75,7 @@ const troubles = [
   "残高不足・上限超過：1 回 1,000 万円・1 日 2,000 万円まで。凍結・休眠・解約口座は取引不可",
 ] as const;
 
+/** 起動から運用までの機能別手順（見出し・説明・箇条書き） */
 const steps = [
   {
     title: "1. 起動とログイン",
@@ -196,23 +206,41 @@ const steps = [
     ],
   },
   {
-    title: "13. 停止・初期化・環境メモ",
+    title: "13. 外部連携（Kong・MuleSoft・役席）",
+    body: "ADMIN メニューの「外部連携」。他行・収納企業・為替相場の提供元からのデータを、Kong（API ゲートウェイ）→ MuleSoft（変換）→ 勘定系の順に取り込みます。",
+    items: [
+      "画面の API は Kong 経由（ログイン 20 回/分・API 1,200 回/分の制限、Liberty 2 台のヘルスチェック付き負荷分散）",
+      "連携先は http://localhost:8088/integration/v1/*（API キー＋連携先ごとの許可）。鍵は .env の KONG_KEY_*",
+      "全銀データ（120 桁固定長・UTF-8 / Shift_JIS）：件数と合計を検証し、口座番号と受取人名が一致すれば入金、不一致は保留。同じファイルを再送しても二重に入金されない",
+      "請求データ（CSV）と為替相場（JSON）も同じ画面から送信でき、結果と実行履歴（誰が・いつ・何件）を確認できる",
+      "MuleSoft は Mule 4 アプリ一式（integration/mulesoft）。ローカルでは同じ API 契約の互換コンテナ（mule）で動く",
+      "初回のみ：12_integration.sql を適用し、python integration/scripts/set_service_password.py で連携用アカウントを有効化",
+    ],
+  },
+  {
+    title: "14. 停止・初期化・環境メモ",
     body: "データを最初の状態に戻すときはボリュームごと削除します。",
     items: [
       "停止：docker compose down",
       "初期化：docker compose down -v（次回起動時に db/init の SQL で再作成）",
       "既存の DB に情報系の表を追加：docker compose exec oracle bash -c \"sqlplus -s / as sysdba @/container-entrypoint-initdb.d/08_information.sql\"",
-      "既存の DB を最新に：同じ要領で 09_loan_management.sql（融資管理）・10_dw_performance.sql（情報系の索引）・11_batch_operations.sql（銀行バッチ）も 1 回ずつ実行",
+      "既存の DB を最新に：同じ要領で 09_loan_management.sql（融資管理）・10_dw_performance.sql（情報系の索引）・11_batch_operations.sql（銀行バッチ）・12_integration.sql（外部連携）も 1 回ずつ実行",
       "Windows でビルドに失敗するとき：COMPOSE_BAKE=false DOCKER_CONTEXT=desktop-linux を付ける",
       "API の稼働確認：http://localhost:9080/bank/api/health（ログイン不要）",
     ],
   },
 ] as const;
 
+// 開閉状態を保存する localStorage のキー
 const STORAGE_KEY = "bank-sample.guide.open";
 
+/** ドラッグ後のパネル位置（画面左上からの px） */
 type Pos = { x: number; y: number };
 
+/**
+ * パネルの開閉状態を管理するフック。開閉を localStorage に保存し、ページを移動・再読み込みしても状態を保つ。
+ * SSR とのずれを避けるため、保存値の読み込みはマウント後（useEffect）に行う。
+ */
 export function useGuideOpen(): [boolean, (open: boolean) => void] {
   const [open, setOpenState] = useState(false);
   useEffect(() => {
@@ -236,13 +264,16 @@ export function useGuideOpen(): [boolean, (open: boolean) => void] {
   return [open, setOpen];
 }
 
+/** UsageGuidePanel の引数：表示するか・閉じるときの処理 */
 type Props = {
   open: boolean;
   onClose: () => void;
 };
 
+/** 利用手順パネル本体。初期位置は CSS で右下、ドラッグすると以降は left/top で位置を指定する。 */
 export function UsageGuidePanel({ open, onClose }: Props) {
   const panelRef = useRef<HTMLDivElement>(null);
+  // ドラッグ中のポインター ID と、パネル左上からのつかみ位置のずれ（再描画不要なので ref で持つ）
   const dragRef = useRef<{ pointerId: number; dx: number; dy: number } | null>(null);
   const [expanded, setExpanded] = useState(true);
   const [pos, setPos] = useState<Pos | null>(null);
@@ -257,6 +288,7 @@ export function UsageGuidePanel({ open, onClose }: Props) {
     };
   }, []);
 
+  // 開いている間だけ Esc キーで閉じる処理と、ウィンドウサイズ変更時の位置補正を登録する
   useEffect(() => {
     if (!open) return;
     const onKey = (e: KeyboardEvent) => {
@@ -271,6 +303,7 @@ export function UsageGuidePanel({ open, onClose }: Props) {
     };
   }, [open, onClose, clamp]);
 
+  // ドラッグ開始：ボタン（data-ug-control）上では開始しない。ポインターをキャプチャし、パネル外に出ても追従させる。
   const onPointerDown = (e: React.PointerEvent<HTMLElement>) => {
     if ((e.target as HTMLElement).closest("[data-ug-control]") || e.button !== 0 || !panelRef.current) return;
     const rect = panelRef.current.getBoundingClientRect();
@@ -280,12 +313,14 @@ export function UsageGuidePanel({ open, onClose }: Props) {
     e.currentTarget.setPointerCapture(e.pointerId);
   };
 
+  // ドラッグ中：つかんだ位置のずれを保ったまま、画面内に収まる位置へ移動する
   const onPointerMove = (e: React.PointerEvent<HTMLElement>) => {
     const drag = dragRef.current;
     if (!drag || drag.pointerId !== e.pointerId) return;
     setPos(clamp(e.clientX - drag.dx, e.clientY - drag.dy));
   };
 
+  // ドラッグ終了（キャンセル時も同じ処理）
   const onPointerUp = (e: React.PointerEvent<HTMLElement>) => {
     const drag = dragRef.current;
     if (!drag || drag.pointerId !== e.pointerId) return;
@@ -296,6 +331,7 @@ export function UsageGuidePanel({ open, onClose }: Props) {
 
   if (!open) return null;
 
+  // 一度ドラッグしたら、CSS の右下配置を打ち消して left/top の固定位置にする
   const style = pos
     ? ({ left: pos.x, top: pos.y, right: "auto", bottom: "auto", margin: 0 } as const)
     : undefined;
@@ -309,6 +345,7 @@ export function UsageGuidePanel({ open, onClose }: Props) {
       aria-label="利用手順"
       aria-modal="false"
     >
+      {/* 見出し部分がドラッグのつかみ手。右側に開閉ボタンと閉じるボタン */}
       <header
         className={styles.header}
         onPointerDown={onPointerDown}
@@ -453,6 +490,7 @@ export function UsageGuidePanel({ open, onClose }: Props) {
 
           <p className={styles.scrollHint}>↓ 起動から運用までの手順</p>
 
+          {/* 機能別の手順（steps 定数から生成） */}
           <ol className={styles.steps}>
             {steps.map((step) => (
               <li key={step.title}>

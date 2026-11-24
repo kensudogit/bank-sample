@@ -1,11 +1,14 @@
 "use client";
 
+// 顧客一覧の画面（/customers、行員専用）。本人確認の状況を確認し、口座開設の申込へ進む入口。
+
 import Link from "next/link";
 import { RequireRole } from "@/components/AuthProvider";
 import { ErrorBox, Loading } from "@/components/Feedback";
 import { useCustomers } from "@/lib/api";
 import { formatDate, idDocLabel, kycLabel } from "@/lib/format";
 
+/** 顧客一覧ページ。窓口担当・管理者のみ表示できる（RequireRole で権限チェック）。 */
 export default function CustomersPage() {
   return (
     <RequireRole roles={["TELLER", "SUPERVISOR"]}>
@@ -14,6 +17,7 @@ export default function CustomersPage() {
   );
 }
 
+/** 顧客の一覧表と、本人確認待ちの件数を表示する。 */
 function CustomerList() {
   const { data: customers, error } = useCustomers();
   const pending = customers?.filter((c) => c.kycStatus === "PENDING").length ?? 0;

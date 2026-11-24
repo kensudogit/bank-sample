@@ -1,10 +1,14 @@
 "use client";
 
+// リスク管理ダッシュボード（/risk、管理者専用）。信用リスク（EAD・期待損失・不良債権・引当）、
+// 流動性リスク（預貸率・満期の近い定期預金）、市場リスク（外貨ポジションの為替感応度）を表示する。
+
 import { RequireRole } from "@/components/AuthProvider";
 import { ErrorBox, Loading } from "@/components/Feedback";
 import { useRiskDashboard, type Row } from "@/lib/banking";
 import { accountTypeLabel, borrowerClassLabel, formatNumber, formatPercent, formatYen, productLabel } from "@/lib/format";
 
+/** リスク管理ページ。管理者（SUPERVISOR）のみ利用できる。 */
 export default function RiskPage() {
   return (
     <RequireRole roles={["SUPERVISOR"]}>
@@ -13,6 +17,7 @@ export default function RiskPage() {
   );
 }
 
+/** リスク指標をサーバーで集計した結果を、信用・流動性・市場の 3 区分で表示する。 */
 function RiskDashboard() {
   const { data, error, loading } = useRiskDashboard();
   if (!data) return error ? <ErrorBox error={error} /> : <Loading />;
@@ -29,6 +34,7 @@ function RiskDashboard() {
       </div>
       <ErrorBox error={error} />
 
+      {/* 信用リスク：主要指標、格付・債務者区分・商品別の内訳、与信集中の上位先 */}
       <section className="card">
         <h2>信用リスク</h2>
         <dl className="stats">
@@ -64,6 +70,7 @@ function RiskDashboard() {
         )}
       </section>
 
+      {/* 流動性リスク：預金と貸出のバランス、近く流出しうる定期預金 */}
       <section className="card">
         <h2>流動性リスク</h2>
         <dl className="stats">
@@ -89,6 +96,7 @@ function RiskDashboard() {
         </div>
       </section>
 
+      {/* 市場リスク（為替）：外貨預金を当行の外貨建て負債として、円安時の影響額を示す */}
       <section className="card">
         <h2>市場リスク（為替）</h2>
         <p className="section-note">お客さまの外貨預金は当行にとって外貨建ての負債（為替ヘッジなしの売り持ち）。円安 1% で円換算の負債が増える額を表示します。</p>
@@ -113,6 +121,7 @@ function RiskDashboard() {
   );
 }
 
+/** 指標 1 つ（ラベル・値・補足）を表示する。tone="minus" で警告色にする。 */
 function Kpi({ label, value, sub, tone }: { label: string; value: string; sub?: string; tone?: "minus" }) {
   return (
     <div className="stat">

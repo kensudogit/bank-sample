@@ -1,5 +1,8 @@
 "use client";
 
+// 融資詳細の画面（/loans/[id]）。融資の概要、返済・繰上返済・借入の操作、返済予定表、取引履歴を表示し、
+// 行員には融資管理（引当・担保・条件変更）と延滞管理・督促、役席には債務者区分の変更と償却を表示する。
+
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import { useState } from "react";
@@ -20,9 +23,12 @@ import {
   productLabel,
 } from "@/lib/format";
 
+/** 返済予定の各回の状態 → 日本語表示名 */
 const scheduleLabel: Record<string, string> = { SCHEDULED: "予定", PARTIAL: "一部入金", PAID: "返済済", OVERDUE: "延滞", CANCELLED: "取消" };
+/** 督促の対応種別 → 日本語表示名 */
 const actionLabel: Record<string, string> = { CALL: "電話", LETTER: "督促状", VISIT: "訪問", PROMISE: "返済約束", LEGAL: "法的手続" };
 
+/** 融資詳細ページ。顧客は自分の融資のみ閲覧できる（サーバー側で確認）。 */
 export default function LoanPage() {
   const { id } = useParams<{ id: string }>();
   const { user } = useAuth();
@@ -31,6 +37,7 @@ export default function LoanPage() {
   const [message, setMessage] = useState<string | null>(null);
   const [showAll, setShowAll] = useState(false);
 
+  // 各操作ボタン共通の実行ヘルパー。成功なら完了メッセージを出して true、失敗ならエラーを出して false を返す。
   const run = async (fn: () => Promise<any>, done: string) => {
     setErr(null);
     setMessage(null);
@@ -47,9 +54,11 @@ export default function LoanPage() {
   if (!loan) return error ? <ErrorBox error={error} /> : <Loading />;
   const staff = user?.staff ?? false;
   const supervisor = user?.role === "SUPERVISOR";
+  // 返済中・延滞中のみ返済などの操作ができる。リボルビング（カードローン等）は返済予定表を持たない。
   const live = loan.status === "ACTIVE" || loan.status === "DELINQUENT";
   const revolving = loan.repaymentMethod === "REVOLVING";
   const schedule: Row[] = loan.schedule;
+  // 既定では未返済の直近 12 回だけを表示する（全回表示に切り替え可能）
   const visible = showAll ? schedule : schedule.filter((s) => s.status !== "PAID" && s.status !== "CANCELLED").slice(0, 12);
   const paidCount = schedule.filter((s) => s.status === "PAID").length;
 
@@ -76,6 +85,7 @@ export default function LoanPage() {
       <ErrorBox error={error ?? err} />
       {message && <SuccessBox>{message}</SuccessBox>}
 
+      {/* 当座貸越は当座預金側の入出金で借入・返済するため、ここに返済フォームは出さない */}
       {live && loan.product !== "OVERDRAFT" && <PaymentForms loan={loan} run={run} />}
 
       {!revolving && schedule.length > 0 && (
@@ -107,6 +117,7 @@ export default function LoanPage() {
         </section>
       )}
 
+      {/* 顧客向けの担保一覧（行員には LoanManagement で保全額付きの詳細を表示する） */}
       {!staff && loan.collaterals.length > 0 && (
         <section className="card table-wrap">
           <h2>担保・保証</h2>
@@ -143,6 +154,7 @@ export default function LoanPage() {
 
       {staff && (live || loan.collectionActions.length > 0) && <CollectionSection loan={loan} run={run} />}
 
+      {/* 債権管理（役席のみ）：債務者区分の変更と、破綻懸念先以下の償却 */}
       {supervisor && live && (
         <section className="card">
           <h2>債権管理（役席）</h2>
@@ -161,9 +173,14 @@ export default function LoanPage() {
   );
 }
 
+/**
+ * 返済・繰上返済（約定返済型）または借入・返済（カードローン）のフォーム。
+ * 冪等キーで二重返済・二重借入を防ぎ、成功後は次の操作用にキーを作り直す。
+ */
 function PaymentForms({ loan, run }: { loan: Row; run: (fn: () => Promise<any>, done: string) => Promise<unknown> }) {
   const card = loan.product === "CARD";
   const [mode, setMode] = useState<"repay" | "prepay" | "draw">(card ? "draw" : "repay");
+  // 期日到来分があれば、その金額を返済額の初期値にする
   const [amount, setAmount] = useState(loan.dueNow > 0 ? String(loan.dueNow) : "");
   const [key, setKey] = useState(newIdempotencyKey);
   const modes = card ? (["draw", "repay"] as const) : (["repay", "prepay"] as const);
@@ -203,6 +220,7 @@ function PaymentForms({ loan, run }: { loan: Row; run: (fn: () => Promise<any>, 
   );
 }
 
+/** 延滞管理・督促（行員のみ）：電話・督促状・訪問などの対応記録と、その履歴。 */
 function CollectionSection({ loan, run }: { loan: Row; run: (fn: () => Promise<any>, done: string) => Promise<unknown> }) {
   const [type, setType] = useState("CALL");
   const [note, setNote] = useState("");

@@ -1,24 +1,35 @@
+// 画面表示用の書式・ラベル定義。
+// 金額・日付の整形、API のコード値（口座種別・取引種別・融資ステータスなど）から日本語表示名への対応表、
+// 全角数字を半角に揃える入力正規化をまとめる。
+
 import type { AccountStatus, AccountType, IdDocType, KycStatus, TxType } from "./types";
 
+// Intl.NumberFormat の生成は重いので、モジュール読み込み時に一度だけ作って使い回す
 const yen = new Intl.NumberFormat("ja-JP", { style: "currency", currency: "JPY" });
 const num = new Intl.NumberFormat("ja-JP");
 
+/** 円建て金額を「￥1,234」形式で表示する。 */
 export const formatYen = (n: number): string => yen.format(n);
 
+/** 数値を 3 桁区切りで表示する。 */
 export const formatNumber = (n: number): string => num.format(n);
 
+/** ISO 日時を「yyyy-MM-dd HH:mm」で表示する（空なら「—」）。タイムゾーン変換はせず API の値をそのまま使う。 */
 export const formatDateTime = (iso: string | null | undefined): string =>
   iso ? iso.replace("T", " ").slice(0, 16) : "—";
 
+/** ISO 日付・日時の日付部分だけを表示する（空なら「—」）。 */
 export const formatDate = (iso: string | null | undefined): string => (iso ? iso.slice(0, 10) : "—");
 
 /** Today's date (yyyy-MM-dd) in the browser's local time zone. */
+// toISOString() は UTC になり日本時間の深夜に前日になってしまうため、ローカル時刻から組み立てる
 export function todayIso(): string {
   const d = new Date();
   const pad = (n: number) => String(n).padStart(2, "0");
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 }
 
+/** 口座種別コード → 日本語表示名 */
 export const accountTypeLabel: Record<AccountType, string> = {
   ORDINARY: "普通",
   SAVINGS: "貯蓄",
@@ -28,10 +39,12 @@ export const accountTypeLabel: Record<AccountType, string> = {
   NOTICE: "通知",
 };
 
+// 通貨ごとの補助単位の桁数（円は小数なし、外貨はセント単位で 2 桁）と、通貨別フォーマッタのキャッシュ
 const minorDigits = (currency: string) => (currency === "JPY" ? 0 : 2);
 const moneyFormats = new Map<string, Intl.NumberFormat>();
 
 /** Formats an amount in the currency's minor unit (JPY yen, USD/EUR cents). */
+// 金額は浮動小数の誤差を避けるため API では補助単位の整数で扱い、表示時にだけ小数に戻す
 export function formatMoney(minor: number, currency: string = "JPY"): string {
   if (currency === "JPY") return formatYen(minor);
   let f = moneyFormats.get(currency);
@@ -42,6 +55,7 @@ export function formatMoney(minor: number, currency: string = "JPY"): string {
   return f.format(minor / 10 ** minorDigits(currency));
 }
 
+/** 融資商品コード → 日本語表示名 */
 export const productLabel: Record<string, string> = {
   HOUSING: "住宅ローン",
   BUSINESS: "事業融資",
@@ -50,6 +64,7 @@ export const productLabel: Record<string, string> = {
   SYNDICATED: "シンジケートローン",
 };
 
+/** 融資申込・融資契約のステータス → 日本語表示名 */
 export const loanStatusLabel: Record<string, string> = {
   APPLIED: "申込受付",
   SCREENED: "審査済",
@@ -64,6 +79,7 @@ export const loanStatusLabel: Record<string, string> = {
   WRITTEN_OFF: "償却",
 };
 
+/** 債務者区分（金融庁の自己査定区分）→ 日本語表示名。貸倒引当金の計算に使われる。 */
 export const borrowerClassLabel: Record<string, string> = {
   NORMAL: "正常先",
   WATCH: "要注意先",
@@ -73,12 +89,14 @@ export const borrowerClassLabel: Record<string, string> = {
   BANKRUPT: "破綻先",
 };
 
+/** 返済方式 → 日本語表示名 */
 export const methodLabel: Record<string, string> = {
   EQUAL_PAYMENT: "元利均等",
   EQUAL_PRINCIPAL: "元金均等",
   REVOLVING: "リボルビング",
 };
 
+/** 振込・送金のステータス → 日本語表示名 */
 export const remitStatusLabel: Record<string, string> = {
   PENDING: "送信待ち",
   SENT: "送信済",
@@ -90,6 +108,7 @@ export const remitStatusLabel: Record<string, string> = {
   DUPLICATE: "重複（取込済み）",
 };
 
+/** AML（マネー・ローンダリング対策）の検知ルール → 日本語表示名 */
 export const amlRuleLabel: Record<string, string> = {
   LARGE_CASH: "大口現金取引",
   STRUCTURING: "分割入金（ストラクチャリング）",
@@ -99,8 +118,10 @@ export const amlRuleLabel: Record<string, string> = {
   FOREIGN_LARGE: "国外送金等調書の対象",
 };
 
+/** 比率（0.123）をパーセント表示（12.3%）にする。 */
 export const formatPercent = (ratio: number, digits = 1): string => `${(ratio * 100).toFixed(digits)}%`;
 
+/** 口座ステータス → 日本語表示名 */
 export const statusLabel: Record<AccountStatus, string> = {
   ACTIVE: "利用可",
   FROZEN: "凍結",
@@ -108,6 +129,7 @@ export const statusLabel: Record<AccountStatus, string> = {
   CLOSED: "解約",
 };
 
+/** 取引種別 → 日本語表示名（入出金明細の表示に使う） */
 export const txTypeLabel: Record<TxType, string> = {
   DEPOSIT: "入金",
   WITHDRAWAL: "出金",
@@ -128,6 +150,7 @@ export const txTypeLabel: Record<TxType, string> = {
 };
 
 /** Transaction types that increase the balance. */
+// 入金系の取引種別。明細で金額をプラス表示するか、マイナス表示するかの判定に使う。
 export const creditTypes: ReadonlySet<TxType> = new Set<TxType>([
   "DEPOSIT",
   "TRANSFER_IN",
@@ -137,8 +160,10 @@ export const creditTypes: ReadonlySet<TxType> = new Set<TxType>([
   "REMIT_IN",
 ]);
 
+/** 本人確認（KYC）ステータス → 日本語表示名 */
 export const kycLabel: Record<KycStatus, string> = { PENDING: "確認待ち", VERIFIED: "確認済", REJECTED: "謝絶" };
 
+/** 本人確認書類の種類 → 日本語表示名 */
 export const idDocLabel: Record<IdDocType, string> = {
   DRIVER_LICENSE: "運転免許証",
   MY_NUMBER_CARD: "マイナンバーカード",
@@ -147,6 +172,7 @@ export const idDocLabel: Record<IdDocType, string> = {
 };
 
 /** Converts full-width digits and strips commas so "１０，０００" becomes "10000". */
+// 日本語 IME で全角入力された金額もそのまま受け付けるため、送信前に半角数字へ正規化する
 export function normalizeAmount(input: string): string {
   return input
     .replace(/[０-９]/g, (d) => String.fromCharCode(d.charCodeAt(0) - 0xfee0))
@@ -154,6 +180,7 @@ export function normalizeAmount(input: string): string {
 }
 
 /** Full-width digits / hyphens to half-width, spaces removed (phone, postal code). */
+// 電話番号・郵便番号用。各種の全角ハイフン・長音記号もすべて半角ハイフンに揃える
 export function normalizeDigits(input: string): string {
   return input
     .replace(/[０-９]/g, (d) => String.fromCharCode(d.charCodeAt(0) - 0xfee0))
@@ -170,4 +197,5 @@ export const segmentLabel: Record<string, string> = {
   LAPSED: "離反",
 };
 
+/** 顧客区分（個人・法人）→ 日本語表示名 */
 export const customerTypeLabel: Record<string, string> = { INDIVIDUAL: "個人", CORPORATE: "法人" };

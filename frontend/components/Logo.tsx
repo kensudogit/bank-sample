@@ -1,9 +1,12 @@
 "use client";
 
+// 銀行のロゴ表示部品。public/logo.png が無い・読めない場合は銀行アイコンで代用する。
+
 import { useState } from "react";
 import { IconBank } from "@/components/Icons";
 
 /** Brand logo: frontend/public/logo.png. Falls back to the bank icon until the file exists. */
+// 画像の読み込みに失敗したら（onError）アイコン表示に切り替える
 export function Logo({ size = 34 }: { size?: number }) {
   const [failed, setFailed] = useState(false);
   if (failed) {

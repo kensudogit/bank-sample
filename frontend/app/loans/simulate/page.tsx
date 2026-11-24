@@ -1,5 +1,7 @@
 "use client";
 
+// 返済シミュレーションの画面（/loans/simulate）。借入条件から返済予定表を作り、元利均等と元金均等を比較する。
+
 import Link from "next/link";
 import { useState } from "react";
 import { ErrorBox } from "@/components/Feedback";
@@ -20,6 +22,7 @@ export default function SimulatePage() {
   const [busy, setBusy] = useState(false);
   const [showAll, setShowAll] = useState(false);
 
+  // 計算はサーバー側（融資の本番計算と同じロジック）で行う。m を渡すと、その返済方法で再計算する。
   const run = async (e?: React.FormEvent, m?: string) => {
     e?.preventDefault();
     setBusy(true);
@@ -37,6 +40,7 @@ export default function SimulatePage() {
   };
 
   const rows: Row[] = result?.schedule ?? [];
+  // 返済予定表は長くなる（最大 420 回）ため、既定では最初の 12 回だけ表示する
   const visible = showAll ? rows : rows.slice(0, 12);
 
   return (
@@ -97,6 +101,7 @@ export default function SimulatePage() {
             </p>
           </section>
 
+          {/* 返済予定表。CSV 出力は表示件数に関係なく全回分を出す */}
           <section className="card table-wrap">
             <div className="chart-head">
               <h2 style={{ margin: 0 }}>返済予定表（{methodLabel[result.method]}・毎月 {result.paymentDay} 日）</h2>

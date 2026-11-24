@@ -1,5 +1,8 @@
 "use client";
 
+// 監査ログの画面（/audit、管理者専用）。監査ログのハッシュチェーン検証、取引元帳の整合性検証、
+// 監査ログの検索・ページ送りを行う。
+
 import { useEffect, useState } from "react";
 import { RequireRole, roleLabel } from "@/components/AuthProvider";
 import { ErrorBox, Loading, SuccessBox } from "@/components/Feedback";
@@ -7,8 +10,10 @@ import { bankApi, prefetchAuditLog, useAuditLog, type AuditQuery } from "@/lib/a
 import { formatNumber } from "@/lib/format";
 import type { AuditVerification, LedgerVerification, Role } from "@/lib/types";
 
+/** 監査ログ一覧の 1 ページあたりの件数 */
 const PAGE_SIZE = 50;
 
+/** 監査ログページ。管理者（SUPERVISOR）のみ利用できる。 */
 export default function AuditPage() {
   return (
     <RequireRole roles={["SUPERVISOR"]}>
@@ -17,6 +22,7 @@ export default function AuditPage() {
   );
 }
 
+/** 改ざん検知（ハッシュチェーン検証）と、条件で絞り込める監査ログ一覧。 */
 function AuditLog() {
   const [draft, setDraft] = useState<AuditQuery>({});
   const [filter, setFilter] = useState<AuditQuery>({});
@@ -31,6 +37,7 @@ function AuditLog() {
   const [verification, setVerification] = useState<AuditVerification | null>(null);
   const [verifyError, setVerifyError] = useState<unknown>(null);
 
+  // 監査ログ全体のハッシュを先頭から計算し直し、途中の書き換え・削除がないかサーバー側で確認する
   const verify = async () => {
     setVerifying(true);
     setVerifyError(null);
@@ -43,6 +50,7 @@ function AuditLog() {
     }
   };
 
+  // 入力欄の変更を draft に反映する（空欄は条件なしとして undefined にする）
   const set = (k: keyof AuditQuery) => (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) =>
     setDraft({ ...draft, [k]: e.target.value || undefined });
 
@@ -73,6 +81,7 @@ function AuditLog() {
       <LedgerCheck />
 
       <section className="card">
+        {/* 検索条件は「検索」ボタンで確定する（入力中は API を呼ばない） */}
         <form className="filters" onSubmit={(e) => { e.preventDefault(); setFilter(draft); setPage(1); }}>
           <label>
             開始日
@@ -166,6 +175,7 @@ function LedgerCheck() {
   const [result, setResult] = useState<LedgerVerification | null>(null);
   const [error, setError] = useState<unknown>(null);
 
+  // 口座番号が空なら全口座を検証する（件数が多いと時間がかかる）
   const run = async () => {
     setRunning(true);
     setError(null);

@@ -93,7 +93,10 @@ public class ApiGuardInterceptor extends AbstractInterceptor {
             if (user.isMustChangePassword() && !allowDuringPasswordChange) {
                 return reject(action, ErrorCode.PASSWORD_CHANGE_REQUIRED);
             }
-            if (!roles.contains(AUTHENTICATED) && !roles.contains(user.getRole())) {
+            // 外部連携のサービスアカウントは、ロールを明示的に列挙した API だけ（AUTHENTICATED の API も不可）
+            boolean listed = roles.contains(user.getRole());
+            boolean allowed = LoginUser.INTEGRATION.equals(user.getRole()) ? listed : (roles.contains(AUTHENTICATED) || listed);
+            if (!allowed) {
                 // 権限外の操作の試みは不正の兆候になり得るため、GET でも DENIED として記録する
                 AuditService.getDefault().record(user, null, actionName, null, AuditService.DENIED,
                         ErrorCode.FORBIDDEN.name(), clientIp(request));

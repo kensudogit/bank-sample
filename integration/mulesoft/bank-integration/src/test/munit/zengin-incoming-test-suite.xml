@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  MUnit：全銀データ取込のテスト。勘定系の呼び出し（core-post）はモックにし、Mule 側の検証・変換・集計だけを確かめる。
+  互換コンテナ（integration/mule-compat）のテストも同じ fixtures を使い、両者の結果がそろうことを確認している。
+-->
+<mule xmlns="http://www.mulesoft.org/schema/mule/core"
+      xmlns:munit="http://www.mulesoft.org/schema/mule/munit"
+      xmlns:munit-tools="http://www.mulesoft.org/schema/mule/munit-tools"
+      xmlns:doc="http://www.mulesoft.org/schema/mule/documentation"
+      xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+      xsi:schemaLocation="
+        http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+        http://www.mulesoft.org/schema/mule/munit http://www.mulesoft.org/schema/mule/munit/current/mule-munit.xsd
+        http://www.mulesoft.org/schema/mule/munit-tools http://www.mulesoft.org/schema/mule/munit-tools/current/mule-munit-tools.xsd">
+
+  <munit:config name="zengin-incoming-test-suite.xml"/>
+
+  <munit:test name="valid-file-is-sent-to-core-and-summarised" description="正しいファイルは勘定系へ送り、入金・保留を集計する">
+    <munit:behavior>
+      <munit-tools:mock-when processor="flow-ref">
+        <munit-tools:with-attributes>
+          <munit-tools:with-attribute attributeName="name" whereValue="core-post"/>
+        </munit-tools:with-attributes>
+        <munit-tools:then-return>
+          <munit-tools:payload value="#[[{ status: 'CREDITED', note: null }, { status: 'HELD', note: '受取人名不一致' }]]"/>
+        </munit-tools:then-return>
+      </munit-tools:mock-when>
+    </munit:behavior>
+    <munit:execution>
+      <munit:set-event>
+        <munit:payload value="#[MunitTools::getResourceAsString('fixtures/zengin-incoming-sample.txt')]" mediaType="text/plain; charset=UTF-8"/>
+        <munit:attributes value="#[{ headers: { 'x-request-id': 'test-1', 'x-consumer-username': 'zengin-network' } }]"/>
+      </munit:set-event>
+      <flow-ref name="zengin-incoming-flow"/>
+    </munit:execution>
+    <munit:validation>
+      <munit-tools:assert-equals actual="#[payload.records]" expected="#[2]"/>
+      <munit-tools:assert-equals actual="#[payload.totalAmount]" expected="#[125000]"/>
+      <munit-tools:assert-equals actual="#[payload.senderBankCode]" expected="#['0005']"/>
+      <munit-tools:assert-equals actual="#[payload.summary.credited]" expected="#[1]"/>
+      <munit-tools:assert-equals actual="#[payload.summary.held]" expected="#[1]"/>
+      <munit-tools:assert-equals actual="#[payload.results[0].referenceNo]" expected="#['ZG-0005-1124-0000000001']"/>
+      <munit-tools:verify-call processor="flow-ref" times="1">
+        <munit-tools:with-attributes>
+          <munit-tools:with-attribute attributeName="name" whereValue="core-post"/>
+        </munit-tools:with-attributes>
+      </munit-tools:verify-call>
+    </munit:validation>
+  </munit:test>
+
+  <munit:test name="broken-trailer-is-rejected-without-calling-core" description="トレーラーの合計が合わないファイルは 1 件も取り込まない"
+              expectedErrorType="APP:INVALID_INPUT">
+    <munit:execution>
+      <munit:set-event>
+        <munit:payload value="#[MunitTools::getResourceAsString('fixtures/zengin-incoming-sample.txt') replace '000000125000' with '000000999999']" mediaType="text/plain; charset=UTF-8"/>
+      </munit:set-event>
+      <flow-ref name="zengin-incoming-flow"/>
+    </munit:execution>
+  </munit:test>
+</mule>

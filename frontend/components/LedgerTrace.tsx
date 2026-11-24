@@ -1,5 +1,7 @@
 "use client";
 
+// 行員向けの「取引の追跡」パネル。入出金明細と監査ログの操作記録を突き合わせて、誰がいつ実行したかを示す。
+
 import { useState } from "react";
 import { roleLabel } from "@/components/AuthProvider";
 import { ErrorBox } from "@/components/Feedback";
@@ -13,6 +15,7 @@ export function LedgerTrace({ accountNo, currency }: { accountNo: string; curren
   const [error, setError] = useState<unknown>(null);
   const [loading, setLoading] = useState(false);
 
+  // 負荷を抑えるため自動では読み込まず、ボタンを押したときだけ取得する
   const load = async () => {
     setLoading(true);
     setError(null);
@@ -49,6 +52,7 @@ export function LedgerTrace({ accountNo, currency }: { accountNo: string; curren
                   <td>{txTypeLabel[t.txType] ?? t.txType}</td>
                   <td className="num">{creditTypes.has(t.txType) ? "+" : "−"}{formatMoney(t.amount, currency)}</td>
                   <td>
+                    {/* 1 件の取引に複数の操作（リトライなど）が対応することがあるため、すべて並べて表示する */}
                     {t.operations.length > 0
                       ? t.operations.map((o) => (
                           <div key={o.auditId}>

@@ -1,5 +1,8 @@
 "use client";
 
+// 為替・口座振替の画面（/payments）。他行宛振込、口座振替（契約・請求取込・引落処理）、海外送金（制裁リスト照合と保留）、
+// 役席向けの全銀データ作成（仕向）と他行からの振込（被仕向）の入金処理を、タブで切り替えて扱う。
+
 import { useState } from "react";
 import { AccountPicker } from "@/components/AccountPicker";
 import { useAuth } from "@/components/AuthProvider";
@@ -18,8 +21,10 @@ import {
 } from "@/lib/banking";
 import { formatDate, formatDateTime, formatMoney, formatYen, normalizeAmount, remitStatusLabel, todayIso } from "@/lib/format";
 
+/** タブの種類。全銀・被仕向は役席のみ表示する。 */
 type Tab = "domestic" | "debit" | "foreign" | "zengin";
 
+/** 為替ページ。役割に応じてタブを追加する。 */
 export default function PaymentsPage() {
   const { user } = useAuth();
   const [tab, setTab] = useState<Tab>("domestic");
@@ -53,6 +58,7 @@ export default function PaymentsPage() {
   );
 }
 
+/** 送金・振替のステータスを色分けしたバッジで表示する（完了系＝成功、保留・待ち＝待機、それ以外＝失敗）。 */
 function StatusBadge({ status }: { status: string }) {
   const tone = ["SENT", "SETTLED", "CREDITED", "PAID", "ACTIVE"].includes(status) ? "SUCCESS"
     : ["HELD", "PENDING"].includes(status) ? "PENDING" : "FAILURE";
@@ -60,6 +66,7 @@ function StatusBadge({ status }: { status: string }) {
 }
 
 // ---------------------------------------------------------------- domestic
+/** 他行宛振込：受付フォームと履歴（送信前の取消、送信後の組戻し）。冪等キーで二重振込を防ぐ。 */
 function DomesticRemittance() {
   const { user } = useAuth();
   const { data: banks } = useBanks();
@@ -71,6 +78,7 @@ function DomesticRemittance() {
   const [err, setErr] = useState<unknown>(null);
   const [sent, setSent] = useState<Row | null>(null);
   const amount = Number(normalizeAmount(form.amount) || 0);
+  // 振込手数料の目安表示（サーバー側の料金表と同じ：3 万円未満 330 円、以上 440 円）
   const fee = amount > 0 ? (amount < 30000 ? 330 : 440) : 0;
   const set = (k: keyof typeof form) => (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) =>
     setForm({ ...form, [k]: e.target.value });
@@ -118,6 +126,7 @@ function DomesticRemittance() {
             <label>
               振込先金融機関
               <select value={form.bankCode} onChange={set("bankCode")}>
+                {/* 9999 は当行自身のコード。当行宛は「振込・振替」画面で行うため選択肢から除く */}
                 {(banks ?? []).filter((b) => b.bankCode !== "9999").map((b) => (
                   <option key={b.bankCode} value={b.bankCode}>{b.bankCode} {b.name}</option>
                 ))}
@@ -178,6 +187,7 @@ function DomesticRemittance() {
                   <td>{formatDate(r.valueDate)}</td>
                   <td><StatusBadge status={r.status} /></td>
                   <td>
+                    {/* 送信待ちは取消、送信済み・決済済みは行員が組戻しを行う */}
                     {r.status === "PENDING" && (
                       <button className="btn btn-secondary btn-small" type="button" onClick={() => act(() => paymentApi.cancel(String(r.remitId)))}>
                         取消
@@ -201,6 +211,7 @@ function DomesticRemittance() {
 }
 
 // ---------------------------------------------------------------- direct debit
+/** 口座振替：契約の登録・解約、収納企業の請求データ取込（行員）、引落日到来分の処理（役席）、引落し状況。 */
 function DirectDebit() {
   const { user } = useAuth();
   const { data: billers } = useBillers();
@@ -223,6 +234,7 @@ function DirectDebit() {
     }
   };
 
+  // 貼り付けた CSV テキストを 1 行ずつ請求データに変換してサーバーへ送る（同じ請求の再取込はサーバー側で重複扱い）
   const importBilling = () => {
     // CSV: billerCode,payerNumber,amount,dueDate
     const items = billing.split(/\r?\n/).map((l) => l.trim()).filter(Boolean).map((l) => {
@@ -328,6 +340,10 @@ function DirectDebit() {
 }
 
 // ---------------------------------------------------------------- foreign
+/**
+ * 海外送金：送金フォーム、履歴、SWIFT MT103 電文の表示、保留案件の判断（役席）。
+ * 受取人が制裁リスト・高リスク国に該当する可能性がある場合、サーバーが保留（HELD）にする。
+ */
 function ForeignRemittance() {
   const { user } = useAuth();
   const { data: list, error } = useForeignRemittances();
@@ -346,6 +362,7 @@ function ForeignRemittance() {
     setBusy(true);
     setErr(null);
     try {
+      // 手数料口座が未指定なら送金元口座から引き落とす
       setSent(await paymentApi.sendForeign({ ...form, feeAccountNo: form.feeAccountNo || form.accountNo, idempotencyKey: key }));
       setKey(newIdempotencyKey());
     } catch (e2) {
@@ -356,11 +373,23 @@ function ForeignRemittance() {
     }
   };
 
+  // 保留中の海外送金を、確認のうえ送金（RELEASE）または謝絶（REJECT）する
   const decide = async (remitId: string, decision: "RELEASE" | "REJECT") => {
     setErr(null);
     try {
       await paymentApi.decideForeign(remitId, decision, decision === "RELEASE" ? "確認の結果、問題なし" : "制裁リスト該当の疑いにより謝絶");
     } catch (e2) {
+      setErr(e2);
+    }
+  };
+
+  // 送信済みの送金の SWIFT MT103 電文を取得して表示する（失敗したらエラーを表示する）
+  const showMessage = async (remitId: string) => {
+    setErr(null);
+    try {
+      setMessage(await paymentApi.foreignOne(remitId));
+    } catch (e2) {
+      setMessage(null);
       setErr(e2);
     }
   };
@@ -442,7 +471,7 @@ function ForeignRemittance() {
                     <div className="actions">
                       {r.status === "SENT" && (
                         <button className="btn btn-secondary btn-small" type="button"
-                          onClick={async () => setMessage(await paymentApi.foreignOne(String(r.remitId)))}>電文</button>
+                          onClick={() => showMessage(String(r.remitId))}>電文</button>
                       )}
                       {user?.role === "SUPERVISOR" && r.status === "HELD" && (
                         <>
@@ -457,6 +486,7 @@ function ForeignRemittance() {
             </tbody>
           </table>
         )}
+        {/* 選択した送金の SWIFT MT103 電文（送信済みのもののみ） */}
         {message && (
           <div style={{ marginTop: 16 }}>
             <h3>SWIFT MT103（No.{message.remitId}）</h3>
@@ -471,6 +501,7 @@ function ForeignRemittance() {
 }
 
 // ---------------------------------------------------------------- Zengin / incoming (supervisor)
+/** 全銀データの作成・内容表示・決済完了（仕向）と、他行からの振込の入金処理・保留案件の処理（被仕向）。役席のみ。 */
 function ZenginAndIncoming() {
   const { data: batches } = useZenginBatches();
   const { data: held } = useRemittances("IN", "HELD");
@@ -490,6 +521,7 @@ function ZenginAndIncoming() {
     }
   };
 
+  // 被仕向の電文の代わりに、貼り付けた CSV テキストを入金データとして送る（仕向銀行コード＋照会番号で二重入金を防止）
   const postIncoming = () => {
     // 1行: 仕向銀行コード,振込依頼人名,口座番号,受取人名（カナ）,金額,照会番号
     const items = incoming.split(/\r?\n/).map((l) => l.trim()).filter(Boolean).map((l) => {
@@ -556,6 +588,7 @@ function ZenginAndIncoming() {
             placeholder="0005,ｶ)ﾃｽﾄｼﾖｳｼﾞ,1000003,サトウ ハナコ,120000,ZG-20261120-0001" />
           <div className="actions"><button className="btn btn-small" type="submit">入金処理</button></div>
         </form>
+        {/* 口座番号と受取人名が一致しなかった保留分：入金口座を指定して入金するか、仕向銀行へ返却する */}
         {held && held.length > 0 && (
           <div className="table-wrap" style={{ marginTop: 16 }}>
             <h3>保留中（{held.length} 件）</h3>

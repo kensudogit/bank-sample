@@ -1,5 +1,7 @@
 "use client";
 
+// 預金商品の画面（/deposits）。定期預金の作成、外国為替相場の表示と更新（管理者のみ）、預金の種類の説明を表示する。
+
 import Link from "next/link";
 import { useState } from "react";
 import { AccountPicker } from "@/components/AccountPicker";
@@ -9,6 +11,7 @@ import { ApiError, newIdempotencyKey } from "@/lib/api";
 import { depositApi, useFxRates, useTimeRates, type Row } from "@/lib/banking";
 import { formatDateTime, formatYen, normalizeAmount } from "@/lib/format";
 
+/** 預金商品ページ。顧客・行員とも利用でき、相場の更新フォームは管理者にだけ表示する。 */
 export default function DepositsPage() {
   return (
     <>
@@ -26,6 +29,7 @@ export default function DepositsPage() {
   );
 }
 
+/** 定期預金の作成フォーム。期間別の金利を表示し、入力額から満期時の利息（税引前の概算）を計算して見せる。 */
 function TimeDepositOpen() {
   const { data: rates, error } = useTimeRates();
   const [source, setSource] = useState("");
@@ -38,6 +42,7 @@ function TimeDepositOpen() {
   const [created, setCreated] = useState<Row | null>(null);
   const rate = rates?.find((r) => String(r.termMonths) === term)?.annualRate;
   const principal = Number(normalizeAmount(amount) || 0);
+  // 概算の単利：元本 × 年利(%) × 月数 ÷ 1200（円未満切捨て）。正式な利息はサーバー側で計算する。
   const gross = rate ? Math.floor((principal * Number(rate) * Number(term)) / 1200) : 0;
 
   const submit = async (e: React.FormEvent) => {
@@ -48,6 +53,7 @@ function TimeDepositOpen() {
       setCreated(await depositApi.openTime({ sourceAccountNo: source, amount: normalizeAmount(amount), termMonths: term,
         instruction, idempotencyKey: key }));
       setAmount("");
+      // 成功したら次の作成用に冪等キーを作り直す（同じキーのままだと 2 件目が二重送信扱いになる）
       setKey(newIdempotencyKey());
     } catch (e2) {
       setErr(e2);
@@ -119,6 +125,7 @@ function TimeDepositOpen() {
   );
 }
 
+/** 外国為替相場（TTS・TTM・TTB）の一覧と、管理者向けの公示相場更新フォーム。 */
 function FxRates() {
   const { user } = useAuth();
   const { data: rates, error } = useFxRates();
@@ -164,6 +171,7 @@ function FxRates() {
           </table>
         </div>
       )}
+      {/* 相場の更新は管理者のみ（サーバー側でも権限を確認する） */}
       {user?.role === "SUPERVISOR" && (
         <form className="filters" onSubmit={update} style={{ marginTop: 16 }}>
           <label>
@@ -188,6 +196,7 @@ function FxRates() {
   );
 }
 
+/** 預金の種類ごとの特徴を表で説明する（静的な案内）。 */
 function ProductGuide() {
   const rows = [
     ["普通預金", "入出金が自由。利息は年2回（2月・8月末までを3月・9月に決算）。"],

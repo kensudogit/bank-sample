@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  運用：稼働状況（/health）、連携の実行履歴（/runs）と、各フロー共通の「実行の記録」。
+  実行履歴には件数・結果・Kong の利用者・要求 ID だけを残し、口座番号や氏名などの明細は残さない。
+-->
+<mule xmlns="http://www.mulesoft.org/schema/mule/core"
+      xmlns:http="http://www.mulesoft.org/schema/mule/http"
+      xmlns:os="http://www.mulesoft.org/schema/mule/os"
+      xmlns:ee="http://www.mulesoft.org/schema/mule/ee/core"
+      xmlns:doc="http://www.mulesoft.org/schema/mule/documentation"
+      xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+      xsi:schemaLocation="
+        http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+        http://www.mulesoft.org/schema/mule/http http://www.mulesoft.org/schema/mule/http/current/mule-http.xsd
+        http://www.mulesoft.org/schema/mule/os http://www.mulesoft.org/schema/mule/os/current/mule-os.xsd
+        http://www.mulesoft.org/schema/mule/ee/core http://www.mulesoft.org/schema/mule/ee/core/current/mule-ee.xsd">
+
+  <!-- 実行の開始：要求 ID（Kong の X-Request-ID）・利用者・開始時刻を変数に置く。
+       X-Bank-Operator（連携コンソールの行員）は Kong の利用者が bank-ops の場合だけ信用する -->
+  <sub-flow name="begin-run">
+    <set-variable variableName="requestId" value="#[attributes.headers['x-request-id'] default uuid()]"/>
+    <set-variable variableName="runId" value="#[uuid()]"/>
+    <set-variable variableName="runStarted" value="#[now()]"/>
+    <set-variable variableName="consumer" value="#[attributes.headers['x-consumer-username'] default 'internal']"/>
+    <set-variable variableName="operator"
+      value="#[if (vars.consumer == 'bank-ops') attributes.headers['x-bank-operator'] default null else null]"/>
+  </sub-flow>
+
+  <sub-flow name="end-run">
+    <os:store key="#[vars.runId]" objectStore="Run_History_Store">
+      <os:value><![CDATA[#[output application/java --- {
+        runId: vars.runId, kind: vars.runKind, startedAt: vars.runStarted as String,
+        durationMs: (now() - vars.runStarted) as Number { unit: "milliseconds" },
+        outcome: vars.runOutcome, consumer: vars.consumer, operator: vars.operator,
+        requestId: vars.requestId, summary: vars.runSummary }]]]></os:value>
+    </os:store>
+    <logger level="INFO" message="#[output application/json --- { event: 'integration-run', runId: vars.runId, kind: vars.runKind, outcome: vars.runOutcome, consumer: vars.consumer, requestId: vars.requestId }]"/>
+  </sub-flow>
+
+  <flow name="health-flow" doc:name="GET /api/v1/health">
+    <http:listener config-ref="Integration_Listener" path="/api/v1/health" allowedMethods="GET"/>
+    <flow-ref name="core-health"/>
+    <ee:transform>
+      <ee:message><ee:set-payload><![CDATA[%dw 2.0 output application/json ---
+{ status: if (vars.coreStatus == "UP") "UP" else "DEGRADED", runtime: "mule", core: vars.coreStatus }]]></ee:set-payload></ee:message>
+    </ee:transform>
+  </flow>
+
+  <flow name="runs-flow" doc:name="GET /api/v1/runs">
+    <http:listener config-ref="Integration_Listener" path="/api/v1/runs" allowedMethods="GET"/>
+    <os:retrieve-all objectStore="Run_History_Store"/>
+    <ee:transform>
+      <ee:message><ee:set-payload><![CDATA[%dw 2.0 output application/json ---
+(valuesOf(payload) orderBy $.startedAt)[-1 to 0] default []]]></ee:set-payload></ee:message>
+    </ee:transform>
+  </flow>
+</mule>

@@ -1,5 +1,8 @@
 "use client";
 
+// AML（マネー・ローンダリング対策）・不正取引モニタリングの画面（/aml、管理者専用）。
+// 自動検知されたアラートを調査し、「問題なし」か「疑わしい取引の届出」で完了させる。
+
 import Link from "next/link";
 import { useState } from "react";
 import { RequireRole } from "@/components/AuthProvider";
@@ -7,8 +10,10 @@ import { ErrorBox, Loading, SuccessBox } from "@/components/Feedback";
 import { riskApi, useAmlAlerts, type Row } from "@/lib/banking";
 import { amlRuleLabel, formatDateTime } from "@/lib/format";
 
+/** アラートの対応状況 → 日本語表示名 */
 const statusLabel: Record<string, string> = { OPEN: "未対応", INVESTIGATING: "調査中", CLOSED: "問題なし", REPORTED: "届出済" };
 
+/** AML アラート画面。管理者（SUPERVISOR）のみ利用できる。 */
 export default function AmlPage() {
   return (
     <RequireRole roles={["SUPERVISOR"]}>
@@ -17,6 +22,7 @@ export default function AmlPage() {
   );
 }
 
+/** 状態別のタブでアラートを一覧し、各アラートの調査結果を入力して状態を更新する。 */
 function AmlAlerts() {
   const [status, setStatus] = useState("OPEN");
   const { data, error } = useAmlAlerts(status || undefined);
@@ -24,6 +30,7 @@ function AmlAlerts() {
   const [message, setMessage] = useState<string | null>(null);
   const [notes, setNotes] = useState<Record<string, string>>({});
 
+  // 各ボタン共通の実行ヘルパー：API を呼び、成功メッセージかエラーを表示する
   const run = async (fn: () => Promise<any>, done: (r: any) => string) => {
     setErr(null);
     setMessage(null);
@@ -74,6 +81,7 @@ function AmlAlerts() {
           </dl>
           <p style={{ margin: "0 0 12px" }}>{a.detail}</p>
           {a.resolutionNote && <p className="section-note">対応: {a.resolutionNote}（{a.assignedTo}）</p>}
+          {/* 未完了のアラートだけ、調査結果の入力欄と対応ボタンを出す */}
           {(a.status === "OPEN" || a.status === "INVESTIGATING") && (
             <form className="filters" onSubmit={(e) => e.preventDefault()}>
               <label style={{ flex: "1 1 320px" }}>

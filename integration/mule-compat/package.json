@@ -1,0 +1,12 @@
+{
+  "name": "bank-mule-compat",
+  "version": "1.0.0",
+  "private": true,
+  "description": "MuleSoft 互換コンテナ（Mule アプリ bank-integration と同じ API 契約をローカルで提供する）",
+  "type": "module",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "start": "node src/server.mjs",
+    "test": "node --test"
+  }
+}

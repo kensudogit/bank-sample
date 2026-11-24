@@ -1,5 +1,7 @@
 "use client";
 
+// 口座開設の申込画面（/customers/new、行員専用）。顧客情報と本人確認書類を受け付けて顧客を登録する。
+
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
@@ -9,8 +11,10 @@ import { ApiError, bankApi, newIdempotencyKey, type RegisterCustomerRequest } fr
 import { idDocLabel, normalizeDigits } from "@/lib/format";
 import type { IdDocType } from "@/lib/types";
 
+/** 入力フォームの状態（冪等キーはフォームとは別に管理する） */
 type Form = Omit<RegisterCustomerRequest, "idempotencyKey">;
 
+/** 初期値（個人・運転免許証） */
 const EMPTY: Form = {
   customerType: "INDIVIDUAL",
   name: "",
@@ -32,13 +36,16 @@ export default function NewCustomerPage() {
   );
 }
 
+/** 申込フォーム本体。登録に成功したら顧客詳細画面へ移り、そこで本人確認を行う。 */
 function NewCustomerForm() {
   const router = useRouter();
   const [form, setForm] = useState<Form>(EMPTY);
+  // 冪等キー：二重クリックや通信の再送で同じ顧客が二重登録されないようにする
   const [key, setKey] = useState(newIdempotencyKey);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<unknown>(null);
 
+  // 各入力欄の onChange をまとめて作るヘルパー
   const set = (field: keyof Form) => (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) =>
     setForm({ ...form, [field]: e.target.value });
 
@@ -48,6 +55,7 @@ function NewCustomerForm() {
     setSubmitting(true);
     setError(null);
     try {
+      // 全角数字・ハイフンを半角に揃え、電話番号はハイフンを除いて送る
       const customer = await bankApi.registerCustomer({
         ...form,
         name: form.name.trim(),
@@ -60,6 +68,7 @@ function NewCustomerForm() {
       router.push(`/customers/${customer.customerId}`);
     } catch (err) {
       setError(err);
+      // 同じキーが処理済み扱いになった場合は、再申込できるようキーを作り直す
       if (err instanceof ApiError && err.code === "DUPLICATE_REQUEST") setKey(newIdempotencyKey());
       setSubmitting(false);
     }
@@ -72,6 +81,7 @@ function NewCustomerForm() {
       <ErrorBox error={error} />
       <section className="card">
         <form className="wide" onSubmit={submit}>
+          {/* 個人・法人の切り替え。法人の場合は項目名を商号・設立日に変える */}
           <div className="tabs" role="tablist">
             {(["INDIVIDUAL", "CORPORATE"] as const).map((t) => (
               <button key={t} type="button" role="tab" className="tab" aria-selected={form.customerType === t}

@@ -1,5 +1,7 @@
 "use client";
 
+// 情報系の帳票画面（/reports、管理者専用）。DWH の日次データから定型帳票を表示し、CSV に出力する。
+
 import { useState } from "react";
 import { RequireRole } from "@/components/AuthProvider";
 import { ErrorBox, Loading } from "@/components/Feedback";
@@ -18,6 +20,7 @@ export default function ReportsPage() {
   );
 }
 
+/** 帳票の一覧。period=true は期間指定、false は基準日指定の帳票。 */
 const REPORTS: { type: ReportType; label: string; period: boolean; note: string }[] = [
   { type: "DEPOSIT_BALANCE", label: "預金残高表", period: false, note: "基準日の預金種類別・通貨別の口座数と残高（外貨は仲値で円換算）" },
   { type: "LOAN_BALANCE", label: "貸出金残高表", period: false, note: "基準日の商品別・債務者区分別の件数と残高" },
@@ -36,6 +39,7 @@ const labelers: Record<string, (v: string) => string> = {
   customerType: (v) => customerTypeLabel[v] ?? v,
 };
 
+/** 列の種類（yen/number/区分値）に応じてセルの表示文字列を作る。 */
 function display(kind: string, v: unknown): string {
   if (v === null || v === undefined || v === "") return "—";
   if (kind === "yen") return formatYen(Number(v));
@@ -43,6 +47,7 @@ function display(kind: string, v: unknown): string {
   return labelers[kind] ? labelers[kind](String(v)) : String(v);
 }
 
+/** 帳票の種類タブ・条件入力・結果の表を表示する。条件を変えるとその条件で再取得する。 */
 function Reports() {
   const [type, setType] = useState<ReportType>("DEPOSIT_BALANCE");
   const [date, setDate] = useState("");
@@ -56,6 +61,8 @@ function Reports() {
   const rows: Row[] = data?.rows ?? [];
   const totals: Row = data?.totals ?? {};
 
+  // CSV 出力：金額・件数は数値のまま、区分値は日本語ラベルにし、合計行があれば末尾に付ける。
+  // ファイル名には帳票の種類と条件（日付）を入れる。
   const exportCsv = () => {
     if (!data) return;
     const csvRows = rows.map((r) => columns.map((c) =>
@@ -124,6 +131,7 @@ function Reports() {
                     </tr>
                   ))}
                 </tbody>
+                {/* 合計行（サーバーが合計を返した帳票のみ） */}
                 {Object.keys(totals).length > 0 && (
                   <tfoot>
                     <tr>

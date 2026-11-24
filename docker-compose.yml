@@ -1,7 +1,10 @@
 name: bank-sample
 
 # High availability layout:
-#   browser -> lb:3000 -> frontend x2 -> lb:9080 -> liberty x2 -> oracle
+#   browser -> lb:3000 -> frontend x2 -> kong:8000 (API gateway) -> liberty x2 -> oracle
+#   partners (Zengin / billing agencies / FX provider) -> kong 127.0.0.1:8088 /integration/v1 (API key + ACL)
+#     -> mule:8081 (MuleSoft Process API; the mule-compat container locally) -> lb:9080 -> liberty x2
+#   lb:9080 stays available for direct API access and for MuleSoft (internal; no double proxy through Kong)
 # Any single frontend / liberty instance can fail or restart without stopping the service:
 # sessions are stored in Oracle, batch jobs run once per day via the JOB_RUN table, and the load balancer
 # skips unhealthy instances. Scale with LIBERTY_REPLICAS / FRONTEND_REPLICAS in .env.
@@ -61,12 +64,18 @@ services:
     build:
       context: ./frontend
       args:
-        BANK_API_ORIGIN: http://lb:9080
+        # Rewrites /api/bank/* to the Kong gateway (Host: kong), which balances across the Liberty instances
+        BANK_API_ORIGIN: http://kong:8000
     image: bank-sample-frontend
     deploy:
       replicas: ${FRONTEND_REPLICAS:-2}
+    environment:
+      # Integration console (/integration): server-side calls to Kong with the bank-ops key (never sent to the browser)
+      BANK_API_INTERNAL: http://kong:8000/bank/api
+      INTEGRATION_GATEWAY_URL: http://kong:8000/integration/v1
+      INTEGRATION_OPS_KEY: ${KONG_KEY_OPS:?set KONG_KEY_OPS in .env}
     depends_on:
-      liberty:
+      kong:
         condition: service_healthy
     restart: unless-stopped
     healthcheck:
@@ -75,6 +84,62 @@ services:
       timeout: 5s
       retries: 10
       start_period: 20s
+
+  # Kong Gateway (OSS, DB-less). Declarative config: integration/kong/kong.yml.tmpl (API keys from .env at start-up)
+  kong:
+    image: kong:3.9.1
+    entrypoint: ["/bin/sh", "/kong/render-config.sh"]
+    environment:
+      KONG_DATABASE: "off"
+      KONG_PROXY_LISTEN: 0.0.0.0:8000
+      # Admin API off (configuration is declarative only); status/metrics on 8100 inside the network
+      KONG_ADMIN_LISTEN: "off"
+      KONG_STATUS_LISTEN: 0.0.0.0:8100
+      KONG_HEADERS: "off"
+      KONG_PROXY_ACCESS_LOG: /dev/stdout
+      KONG_PROXY_ERROR_LOG: /dev/stderr
+      # Client IP for rate limits: trust X-Forwarded-For only from the private container networks (lb / frontend)
+      KONG_TRUSTED_IPS: 10.0.0.0/8,172.16.0.0/12,192.168.0.0/16
+      KONG_REAL_IP_HEADER: X-Forwarded-For
+      KONG_REAL_IP_RECURSIVE: "on"
+      KONG_NGINX_WORKER_PROCESSES: "2"
+      KONG_KEY_ZENGIN: ${KONG_KEY_ZENGIN:?set KONG_KEY_ZENGIN in .env}
+      KONG_KEY_BILLING: ${KONG_KEY_BILLING:?set KONG_KEY_BILLING in .env}
+      KONG_KEY_FX: ${KONG_KEY_FX:?set KONG_KEY_FX in .env}
+      KONG_KEY_OPS: ${KONG_KEY_OPS:?set KONG_KEY_OPS in .env}
+    volumes:
+      - ./integration/kong/kong.yml.tmpl:/kong/kong.yml.tmpl:ro
+      - ./integration/kong/render-config.sh:/kong/render-config.sh:ro
+    ports:
+      # Partner entry point (/integration/v1/*). The /bank/api routes only answer to Host: kong (frontend)
+      - "127.0.0.1:${KONG_HOST_PORT:-8088}:8000"
+    depends_on:
+      liberty:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "kong", "health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+
+  # MuleSoft integration (Process API). Locally the mule-compat container serves the same contract as the Mule 4 app in
+  # integration/mulesoft/bank-integration; replace this service with a Mule runtime image to run the real app.
+  mule:
+    build:
+      context: ./integration/mule-compat
+    image: bank-sample-mule-compat
+    environment:
+      CORE_BASE_URL: http://lb:9080/bank/api
+      MULE_CORE_USER: svc-mule
+      MULE_CORE_PASSWORD: ${MULE_CORE_PASSWORD:?set MULE_CORE_PASSWORD in .env}
+      OUR_BANK_CODE: "9999"
+      TZ: Asia/Tokyo
+    depends_on:
+      liberty:
+        condition: service_healthy
+    restart: unless-stopped
 
   # Load balancer (nginx): 127.0.0.1:3000 for browsers, 127.0.0.1:9080 for the API
   lb:

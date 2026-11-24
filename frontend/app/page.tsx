@@ -1,5 +1,7 @@
 "use client";
 
+// ホーム画面（/）。顧客には自分の口座のタイル一覧と総残高を、行員には全口座の検索・一覧（ページ送り付き）を表示する。
+
 import Link from "next/link";
 import { useEffect, useState } from "react";
 import { useAuth } from "@/components/AuthProvider";
@@ -9,13 +11,16 @@ import { prefetchAccountDetail, prefetchAccounts, useAccounts } from "@/lib/api"
 import { accountTypeLabel, formatDate, formatDateTime, formatMoney, formatNumber, formatYen, statusLabel } from "@/lib/format";
 import type { Account } from "@/lib/types";
 
+/** 行員向け口座一覧の 1 ページあたりの件数 */
 const PAGE_SIZE = 50;
 
+/** 時間帯に応じた挨拶（顧客向けの見出しに使う） */
 function greeting(): string {
   const h = new Date().getHours();
   return h < 11 ? "おはようございます" : h < 18 ? "こんにちは" : "こんばんは";
 }
 
+/** ホーム（口座一覧）ページ。ログイン利用者が顧客か行員かで表示を切り替える。 */
 export default function DashboardPage() {
   const { user } = useAuth();
   const [draft, setDraft] = useState("");
@@ -93,6 +98,7 @@ export default function DashboardPage() {
                   )}
                 </div>
               </form>
+              {/* ページ送り中は前ページの結果を薄く表示し、新しい結果が届いたら差し替える */}
               <div className={placeholder ? "is-stale" : undefined} aria-busy={placeholder}>
                 <AccountTable accounts={data.items} />
               </div>
@@ -117,6 +123,7 @@ export default function DashboardPage() {
   );
 }
 
+/** 顧客向け：口座ごとのタイル。マウスを乗せた・フォーカスした・タッチした時点で口座詳細を先読みする。 */
 function AccountTiles({ accounts }: { accounts: Account[] }) {
   if (accounts.length === 0) return <p className="empty card">ご利用の口座はありません。</p>;
   return (
@@ -142,6 +149,7 @@ function AccountTiles({ accounts }: { accounts: Account[] }) {
   );
 }
 
+/** 行員向け：口座の一覧表。口座番号のリンクにも同様の先読みを付ける。 */
 function AccountTable({ accounts }: { accounts: Account[] }) {
   if (accounts.length === 0) return <p className="empty">該当する口座はありません。</p>;
   return (

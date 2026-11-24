@@ -1,5 +1,8 @@
 "use client";
 
+// 融資申込の詳細画面（/loans/applications/[id]）。与信審査（スコア・格付・DTI・LTV）、役席の承認/謝絶、
+// 担保・保証やシンジケート参加行の登録、契約締結、融資実行までの一連の手続きを行う。
+
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import { useState } from "react";
@@ -10,6 +13,7 @@ import { loanApi, useLoanApplication, type Row } from "@/lib/banking";
 import { formatDateTime, formatPercent, formatYen, loanStatusLabel, methodLabel, normalizeAmount, productLabel } from "@/lib/format";
 import { newIdempotencyKey } from "@/lib/api";
 
+/** 担保・保証の種類 → 日本語表示名 */
 const collateralLabel: Record<string, string> = {
   REAL_ESTATE: "不動産（抵当権）",
   DEPOSIT: "預金担保",
@@ -18,6 +22,7 @@ const collateralLabel: Record<string, string> = {
   GUARANTEE_CO: "保証会社",
 };
 
+/** 申込詳細ページ。状態（申込受付 → 審査済 → 承認 → 契約済）と役割に応じて操作を出し分ける。 */
 export default function ApplicationPage() {
   const { id } = useParams<{ id: string }>();
   const { user } = useAuth();
@@ -25,6 +30,7 @@ export default function ApplicationPage() {
   const [err, setErr] = useState<unknown>(null);
   const [message, setMessage] = useState<string | null>(null);
 
+  // 各操作ボタン共通の実行ヘルパー（成功メッセージかエラーを表示する）
   const run = async (fn: () => Promise<any>, done: string) => {
     setErr(null);
     setMessage(null);
@@ -39,6 +45,7 @@ export default function ApplicationPage() {
   if (!app) return error ? <ErrorBox error={error} /> : <Loading />;
   const staff = user?.staff ?? false;
   const supervisor = user?.role === "SUPERVISOR";
+  // 担保や参加行を追加できるのは契約前（申込受付・審査済・承認）まで
   const editable = ["APPLIED", "SCREENED", "APPROVED"].includes(app.status);
 
   return (
@@ -91,6 +98,7 @@ export default function ApplicationPage() {
             </button>
           )}
         </div>
+        {/* 審査済みの申込は役席が承認・謝絶を判断する */}
         {supervisor && app.status === "SCREENED" && <DecisionForm id={id} app={app} run={run} />}
       </section>
 
@@ -115,6 +123,7 @@ export default function ApplicationPage() {
         {staff && editable && <CollateralForm id={id} run={run} />}
       </section>
 
+      {/* シンジケートローンのみ：参加金融機関と分担額 */}
       {app.product === "SYNDICATED" && (
         <section className="card">
           <h2>シンジケート団（参加金融機関）</h2>
@@ -143,6 +152,7 @@ export default function ApplicationPage() {
         <section className="card">
           <h2>契約</h2>
           <p>融資 <Link href={`/loans/${app.loanId}`}>No.{app.loanId}</Link> {app.status === "CONTRACTED" ? "（実行待ち）" : ""}</p>
+          {/* 融資実行（融資金を返済用口座へ入金する）。実行ごとに新しい冪等キーを付けて送る */}
           {staff && app.status === "CONTRACTED" && (
             <button className="btn" type="button" onClick={() => run(() => loanApi.disburse(String(app.loanId), newIdempotencyKey()), "融資を実行しました")}>
               融資を実行する
@@ -154,8 +164,10 @@ export default function ApplicationPage() {
   );
 }
 
+/** 親から受け取る実行ヘルパーの型 */
 type Run = (fn: () => Promise<any>, done: string) => Promise<void>;
 
+/** 承認・謝絶のフォーム（役席）。承認時は金利を調整できる。謝絶推奨の案件を承認する場合は理由が必須（サーバー側で確認）。 */
 function DecisionForm({ id, app, run }: { id: string; app: Row; run: Run }) {
   const [note, setNote] = useState("");
   const [rate, setRate] = useState(String(app.proposedRate ?? ""));
@@ -177,6 +189,7 @@ function DecisionForm({ id, app, run }: { id: string; app: Row; run: Run }) {
   );
 }
 
+/** 担保・保証の登録フォーム。種類に応じて抵当権の順位や保証人名の入力欄を出す。 */
 function CollateralForm({ id, run }: { id: string; run: Run }) {
   const [f, setF] = useState({ collateralType: "REAL_ESTATE", description: "", appraisalValue: "", lienRank: "1", guarantorName: "" });
   const set = (k: keyof typeof f) => (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) => setF({ ...f, [k]: e.target.value });
@@ -216,6 +229,7 @@ function CollateralForm({ id, run }: { id: string; run: Run }) {
   );
 }
 
+/** シンジケートローンの参加金融機関（分担額・役割）の登録フォーム */
 function ParticipantForm({ id, run }: { id: string; run: Run }) {
   const [f, setF] = useState({ lenderName: "", shareAmount: "", role: "PARTICIPANT" });
   return (
@@ -243,6 +257,7 @@ function ParticipantForm({ id, run }: { id: string; run: Run }) {
   );
 }
 
+/** 契約締結フォーム：返済用口座と毎月の返済日を指定して契約する。 */
 function ContractForm({ id, run }: { id: string; run: Run }) {
   const [accountNo, setAccountNo] = useState("");
   const [day, setDay] = useState("27");

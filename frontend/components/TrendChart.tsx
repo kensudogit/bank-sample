@@ -1,5 +1,8 @@
 "use client";
 
+// 日次推移の折れ線グラフ部品（外部ライブラリなしの SVG 描画）。
+// 最大 2 系列を同じ縦軸で描き、ホバーで十字線とツールチップ、スクリーンリーダー向けに表形式も出力する。
+
 import { useMemo, useRef, useState } from "react";
 import { formatYen } from "@/lib/format";
 
@@ -12,10 +15,12 @@ export interface TrendSeries {
   values: number[];
 }
 
+// SVG の座標系の大きさと余白（実際の表示幅には viewBox で拡大縮小して合わせる）
 const WIDTH = 720;
 const HEIGHT = 240;
 const PAD = { top: 16, right: 84, bottom: 28, left: 72 };
 
+/** 最小値〜最大値を約 4 分割し、1・2・2.5・5 の倍数のきりのよい目盛り値を返す。 */
 function niceTicks(min: number, max: number): number[] {
   if (max === min) return [min];
   const step0 = (max - min) / 4;
@@ -33,10 +38,12 @@ function axisYen(v: number): string {
   return v.toLocaleString("ja-JP");
 }
 
+/** 日付の配列と系列データからグラフを描く。title は見出しと aria-label に使う。 */
 export function TrendChart({ dates, series, title }: { dates: string[]; series: TrendSeries[]; title: string }) {
   const wrap = useRef<HTMLDivElement>(null);
   const [hover, setHover] = useState<number | null>(null);
 
+  // 目盛り・座標変換関数はデータが変わったときだけ計算し直す。縦軸は 0 未満にしない。
   const geo = useMemo(() => {
     const all = series.flatMap((s) => s.values);
     const lo = Math.min(...all);
@@ -54,6 +61,7 @@ export function TrendChart({ dates, series, title }: { dates: string[]; series: 
 
   if (dates.length === 0) return <p className="muted">取込済みのデータがありません。</p>;
 
+  // ポインター位置（表示上の px）を SVG 座標に換算し、最も近い日付の位置にホバーを合わせる
   const onMove = (e: React.PointerEvent<SVGSVGElement>) => {
     const rect = e.currentTarget.getBoundingClientRect();
     const px = ((e.clientX - rect.left) / rect.width) * WIDTH;
@@ -77,6 +85,7 @@ export function TrendChart({ dates, series, title }: { dates: string[]; series: 
       </div>
       <svg viewBox={`0 0 ${WIDTH} ${HEIGHT}`} role="img" aria-label={`${title}（${dates[0]} 〜 ${dates[last]}）`}
         onPointerMove={onMove} onPointerLeave={() => setHover(null)}>
+        {/* 横方向の補助線 */}
         <g className="grid">
           {geo.ticks.map((t) => (
             <line key={t} x1={PAD.left} x2={WIDTH - PAD.right} y1={geo.y(t)} y2={geo.y(t)} />
@@ -90,6 +99,7 @@ export function TrendChart({ dates, series, title }: { dates: string[]; series: 
             <text key={i} x={geo.x(i)} y={HEIGHT - 6} textAnchor="middle">{dates[i].slice(5).replace("-", "/")}</text>
           ))}
         </g>
+        {/* 各系列の折れ線と、線の右端に置く系列名ラベル（凡例を見なくても分かるように） */}
         {series.map((s, si) => (
           <g key={s.label}>
             <path className={`line-${si + 1}`}
@@ -115,6 +125,7 @@ export function TrendChart({ dates, series, title }: { dates: string[]; series: 
           ))}
         </div>
       )}
+      {/* 視覚的には隠し、スクリーンリーダーにだけ数値を表として読ませる */}
       <table className="sr-only">
         <caption>{title}</caption>
         <thead><tr><th>日付</th>{series.map((s) => <th key={s.label}>{s.label}</th>)}</tr></thead>

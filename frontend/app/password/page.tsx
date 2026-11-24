@@ -1,11 +1,14 @@
 "use client";
 
+// パスワード変更の画面（/password）。初期パスワードのままの利用者は、ログイン直後にここへ誘導される。
+
 import { useRouter } from "next/navigation";
 import { useState } from "react";
 import { useAuth } from "@/components/AuthProvider";
 import { ErrorBox, SuccessBox } from "@/components/Feedback";
 import { ApiError, authApi } from "@/lib/api";
 
+/** パスワード変更ページ。新旧パスワードの強度チェックはサーバー側で行い、ここでは確認入力の一致だけを見る。 */
 export default function PasswordPage() {
   const router = useRouter();
   const { user, setUser } = useAuth();
@@ -20,6 +23,7 @@ export default function PasswordPage() {
     e.preventDefault();
     if (submitting) return;
     setError(null);
+    // 確認入力の不一致はサーバーに送らず、API エラーと同じ形で画面に表示する
     if (next !== confirm) {
       setError(new ApiError(400, "VALIDATION_ERROR", "新しいパスワード（確認）が一致しません。"));
       return;
@@ -31,6 +35,7 @@ export default function PasswordPage() {
       setCurrent("");
       setNext("");
       setConfirm("");
+      // 変更後の利用者情報（mustChangePassword=false）を反映してからホームへ移る
       setUser(updated);
       router.replace("/");
     } catch (err) {

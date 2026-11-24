@@ -1,6 +1,10 @@
+// 画面で使う SVG アイコン集（外部アイコンライブラリに依存しないよう自前で定義）。
+// 色は currentColor で文字色に追従する。title を渡さない限り装飾扱い（aria-hidden）になる。
+
 /** Small inline SVG icon set (stroke icons, 24px grid). Decorative unless a title is passed. */
 type IconProps = { size?: number; title?: string };
 
+/** 全アイコン共通の SVG 外枠（24px グリッド・線画スタイル） */
 function Svg({ size = 20, title, children }: IconProps & { children: React.ReactNode }) {
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8}
@@ -11,6 +15,7 @@ function Svg({ size = 20, title, children }: IconProps & { children: React.React
   );
 }
 
+// 以下、各画面・メニューで使う個別のアイコン
 export const IconHome = (p: IconProps) => (
   <Svg {...p}><path d="M3 10.5 12 3l9 7.5" /><path d="M5 9.5V21h14V9.5" /><path d="M10 21v-6h4v6" /></Svg>
 );
@@ -85,4 +90,8 @@ export const IconReport = (p: IconProps) => (
 );
 export const IconLayers = (p: IconProps) => (
   <Svg {...p}><path d="m12 3 9 5-9 5-9-5z" /><path d="m3 13 9 5 9-5" /></Svg>
+);
+/** 外部連携（Kong・MuleSoft）：2 本のプラグをつなぐ形 */
+export const IconPlug = (p: IconProps) => (
+  <Svg {...p}><path d="M9 7V3" /><path d="M15 7V3" /><path d="M6 7h12v4a6 6 0 0 1-12 0z" /><path d="M12 17v4" /></Svg>
 );

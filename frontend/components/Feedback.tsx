@@ -1,6 +1,12 @@
+// 画面共通のフィードバック表示部品：エラー表示・成功表示・読み込み中のスケルトン。
+
 import { IconAlert, IconCheck } from "@/components/Icons";
 import { ApiError } from "@/lib/api";
 
+/**
+ * API エラーのメッセージと項目別エラーを一覧表示する。error が空なら何も表示しない。
+ * ApiError 以外（想定外の例外）は内部情報を見せず、汎用メッセージにする。
+ */
 export function ErrorBox({ error }: { error: unknown }) {
   if (!error) return null;
   const message = error instanceof ApiError ? error.message : "予期しないエラーが発生しました。";
@@ -22,6 +28,7 @@ export function ErrorBox({ error }: { error: unknown }) {
   );
 }
 
+/** 処理成功のメッセージを表示する（role="status" でスクリーンリーダーにも通知）。 */
 export function SuccessBox({ children }: { children: React.ReactNode }) {
   return (
     <div className="alert alert-success" role="status">

@@ -1,5 +1,8 @@
 "use client";
 
+// 融資の画面（/loans）。融資一覧・申込一覧・新規申込の 3 タブ構成。
+// 顧客は自分の融資と申込だけを見られ（サーバー側で絞り込み）、法人向け商品は申し込めない。
+
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
@@ -17,6 +20,7 @@ import {
   productLabel,
 } from "@/lib/format";
 
+/** 融資ページ。タブで一覧と申込フォームを切り替える。 */
 export default function LoansPage() {
   const { user } = useAuth();
   const [tab, setTab] = useState<"loans" | "apps" | "apply">("loans");
@@ -42,6 +46,7 @@ export default function LoansPage() {
   );
 }
 
+/** 融資（契約済み・実行済み）の一覧。延滞日数があれば状態の横に表示する。 */
 function LoanList() {
   const { data, error } = useLoans();
   return (
@@ -75,6 +80,7 @@ function LoanList() {
   );
 }
 
+/** 融資申込の一覧。審査済みなら格付・スコア・システムの推奨判定も表示する。 */
 function ApplicationList() {
   const { data, error } = useLoanApplications();
   return (
@@ -106,6 +112,10 @@ function ApplicationList() {
   );
 }
 
+/**
+ * 融資商品の定義。corporate=true は法人向け（顧客のログインでは選べない）、
+ * term=false は期間の無い極度額型（カードローン・当座貸越）で、期間・返済方法の入力欄を出さない。
+ */
 const PRODUCTS: Record<string, { label: string; note: string; corporate: boolean; term: boolean }> = {
   HOUSING: { label: "住宅ローン", note: "個人・不動産担保。5〜35年。完済時80歳まで。", corporate: false, term: true },
   CARD: { label: "カードローン", note: "個人・極度額10万〜500万円（年収の3分の1まで：総量規制）。随時借入・返済。", corporate: false, term: false },
@@ -114,6 +124,7 @@ const PRODUCTS: Record<string, { label: string; note: string; corporate: boolean
   SYNDICATED: { label: "シンジケートローン", note: "法人・複数金融機関による協調融資（当行はアレンジャー）。", corporate: true, term: true },
 };
 
+/** 融資の申込フォーム。商品に応じて入力項目（担保評価額・組成総額など）を出し分ける。 */
 function ApplyForm({ onDone }: { onDone: () => void }) {
   const { user } = useAuth();
   const router = useRouter();
@@ -125,6 +136,7 @@ function ApplyForm({ onDone }: { onDone: () => void }) {
   const p = PRODUCTS[form.product];
   const set = (k: keyof typeof form) => (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) =>
     setForm({ ...form, [k]: e.target.value });
+  // 顧客には個人向け商品だけを選択肢として出す
   const choices = Object.entries(PRODUCTS).filter(([, v]) => !user?.customer || !v.corporate);
 
   const submit = async (e: React.FormEvent) => {
@@ -133,10 +145,12 @@ function ApplyForm({ onDone }: { onDone: () => void }) {
     setErr(null);
     try {
       const body: Record<string, string> = { ...form };
+      // 金額項目は全角数字・カンマを取り除いて送る
       for (const k of ["amount", "annualIncome", "existingDebtAnnual", "collateralValue", "syndicateTotal"]) {
         body[k] = normalizeAmount(body[k]);
       }
       const app = await loanApi.apply(body);
+      // 行員は続けて審査するため申込詳細へ、顧客は申込一覧タブへ戻す
       if (user?.staff) router.push(`/loans/applications/${app.applicationId}`);
       else onDone();
     } catch (e2) {
@@ -152,6 +166,7 @@ function ApplyForm({ onDone }: { onDone: () => void }) {
       <ErrorBox error={err} />
       <form className="wide" onSubmit={submit}>
         <div className="form-grid">
+          {/* 行員は顧客番号を指定して代理で申し込む。顧客はログイン中の本人で申し込む */}
           {user?.staff && (
             <label>
               顧客番号

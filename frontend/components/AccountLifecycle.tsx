@@ -1,5 +1,7 @@
 "use client";
 
+// 口座のライフサイクル操作の部品：口座解約（利息決算と払戻し）と休眠口座の解除。口座詳細画面から使う。
+
 import { useState } from "react";
 import { ErrorBox, SuccessBox } from "@/components/Feedback";
 import { InterestTable } from "@/components/InterestPreview";
@@ -18,9 +20,11 @@ export function CloseAccount({ account }: { account: Account }) {
   const [error, setError] = useState<unknown>(null);
   const [result, setResult] = useState<CloseResult | null>(null);
 
+  // 払戻し先の候補は、同じ顧客名義で利用可能な他の口座
   const payoutCandidates =
     customer?.accounts.filter((a) => a.status === "ACTIVE" && a.accountNo !== account.accountNo) ?? [];
 
+  // 解約は取り消せないため、確認画面を経てから実行する。冪等キーで二重解約を防ぐ。
   const execute = async () => {
     if (submitting) return;
     setSubmitting(true);
@@ -42,6 +46,7 @@ export function CloseAccount({ account }: { account: Account }) {
     }
   };
 
+  // 解約完了：決算利息と払戻し額を表示する
   if (result) {
     return (
       <section className="card confirm">
@@ -69,12 +74,14 @@ export function CloseAccount({ account }: { account: Account }) {
     );
   }
 
+  // 払戻し見込み額 = 現在残高 + 税引後の見込み利息
   const estimatedPayout = account.balance + (interest?.netInterest ?? 0);
   return (
     <section className="card">
       <h2>口座解約</h2>
       <p className="section-note">解約日前日までの利息を決算したうえで、残高をすべて払い戻します。この操作は取り消せません。</p>
       <ErrorBox error={error} />
+      {/* 1 段階目：払戻し方法の選択 → 2 段階目：内容確認と実行 */}
       {!confirming ? (
         <form onSubmit={(e) => { e.preventDefault(); setError(null); setConfirming(true); }}>
           <label>
@@ -126,6 +133,7 @@ export function ReactivateAccount({ account }: { account: Account }) {
   const [error, setError] = useState<unknown>(null);
   const [done, setDone] = useState(false);
 
+  // 冪等キーにより、二重クリックしても休眠解除は 1 回だけ実行される
   const execute = async () => {
     if (submitting) return;
     setSubmitting(true);

@@ -1,0 +1,211 @@
+openapi: 3.0.3
+info:
+  title: 永劫銀行 外部連携 API（MuleSoft Process API）
+  version: 1.0.0
+  description: |
+    他行・収納企業・為替相場の提供元から受け取るデータを、勘定系（Struts 2 / Liberty）の形式に変換して取り込む。
+    外部からは Kong 経由（/integration/v1/*、API キー＋ACL）でのみ呼べる。Mule アプリ自身は社内ネットワークに置く。
+    エラーは RFC 9457（application/problem+json）で返す。
+    デモ用サンプル（架空データ）。本番利用不可。
+servers:
+  - url: http://localhost:8088/integration/v1
+    description: Kong 経由（ローカル）
+  - url: http://mule:8081/api/v1
+    description: Mule アプリ（社内ネットワーク内）
+tags:
+  - name: zengin
+    description: 全銀システムからの被仕向振込（入金）
+  - name: billing
+    description: 収納企業からの口座振替の請求データ
+  - name: fx
+    description: 外国為替の公示相場
+  - name: ops
+    description: 稼働状況と連携の実行履歴
+paths:
+  /zengin/incoming:
+    post:
+      tags: [zengin]
+      summary: 全銀フォーマット（総合振込・120 桁固定長）の被仕向データを取り込む
+      description: |
+        ヘッダー（1）・データ（2）・トレーラー（8）・エンド（9）の各レコードを検証し（桁数・件数・合計金額）、
+        当行（9999）宛てのデータを勘定系の被仕向入金 API へ 100 件ずつ送る。口座番号と受取人名が一致すれば入金、
+        不一致は保留。仕向銀行コードと照会番号が同じデータは二重に入金されない（重複として返る）。
+        文字コードは Content-Type の charset（UTF-8 または Shift_JIS）。
+      requestBody:
+        required: true
+        content:
+          text/plain:
+            schema: { type: string }
+      responses:
+        "200":
+          description: 取込結果
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ZenginResult" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "502": { $ref: "#/components/responses/Problem" }
+  /billing/import:
+    post:
+      tags: [billing]
+      summary: 収納企業の請求データ（CSV）を取り込む
+      description: |
+        1 行目は見出し（収納企業コード,お客さま番号,金額,引落日 または billerCode,payerNumber,amount,dueDate）。
+        金額はカンマ付きも可、引落日は yyyy-MM-dd または yyyyMMdd。最大 1,000 行。
+      requestBody:
+        required: true
+        content:
+          text/csv:
+            schema: { type: string }
+      responses:
+        "200":
+          description: 取込結果
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BillingResult" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "502": { $ref: "#/components/responses/Problem" }
+  /fx/rates:
+    post:
+      tags: [fx]
+      summary: 為替相場の提供元から仲値とスプレッドを受け取り、公示相場を更新する
+      description: 当行が扱う通貨（USD・EUR）だけを更新し、それ以外は skipped として返す。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/FxRatesRequest" }
+      responses:
+        "200":
+          description: 更新結果
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/FxResult" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "502": { $ref: "#/components/responses/Problem" }
+  /health:
+    get:
+      tags: [ops]
+      summary: Mule アプリと勘定系への接続の状態
+      responses:
+        "200":
+          description: 稼働中
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, enum: [UP, DEGRADED] }
+                  runtime: { type: string, description: "mule（Mule ランタイム）または mule-compat（互換コンテナ）" }
+                  core: { type: string, enum: [UP, DOWN] }
+  /runs:
+    get:
+      tags: [ops]
+      summary: 直近の連携の実行履歴（新しい順・最大 50 件）
+      responses:
+        "200":
+          description: 実行履歴
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Run" }
+components:
+  responses:
+    Problem:
+      description: エラー（RFC 9457）
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+  schemas:
+    Problem:
+      type: object
+      required: [type, title, status]
+      properties:
+        type: { type: string, example: "https://bank.example/problems/zengin-invalid" }
+        title: { type: string }
+        status: { type: integer }
+        detail: { type: string }
+        errors:
+          type: array
+          items:
+            type: object
+            properties:
+              line: { type: integer }
+              message: { type: string }
+        requestId: { type: string }
+    ZenginResult:
+      type: object
+      properties:
+        runId: { type: string }
+        senderBankCode: { type: string, example: "0005" }
+        remitterNameKana: { type: string }
+        tradeDate: { type: string, description: "MMdd" }
+        records: { type: integer }
+        totalAmount: { type: integer }
+        summary:
+          type: object
+          properties:
+            credited: { type: integer }
+            held: { type: integer }
+            duplicate: { type: integer }
+            rejected: { type: integer, description: "当行宛てでないなど、勘定系へ送らなかった件数" }
+        results:
+          type: array
+          items:
+            type: object
+            properties:
+              line: { type: integer }
+              accountNo: { type: string }
+              amount: { type: integer }
+              referenceNo: { type: string }
+              status: { type: string, enum: [CREDITED, HELD, DUPLICATE, REJECTED] }
+              note: { type: string, nullable: true }
+    BillingResult:
+      type: object
+      properties:
+        runId: { type: string }
+        rows: { type: integer }
+        results:
+          type: array
+          items:
+            type: object
+            properties:
+              billerCode: { type: string }
+              payerNumber: { type: string }
+              result: { type: string }
+    FxRatesRequest:
+      type: object
+      required: [provider, rates]
+      properties:
+        provider: { type: string, maxLength: 40 }
+        asOf: { type: string, format: date-time }
+        rates:
+          type: array
+          minItems: 1
+          maxItems: 20
+          items:
+            type: object
+            required: [currency, mid, spread]
+            properties:
+              currency: { type: string, pattern: "^[A-Z]{3}$" }
+              mid: { type: string, pattern: "^[0-9]{1,6}(\\.[0-9]{1,4})?$" }
+              spread: { type: string, pattern: "^[0-9]{1,4}(\\.[0-9]{1,4})?$" }
+    FxResult:
+      type: object
+      properties:
+        runId: { type: string }
+        provider: { type: string }
+        updated: { type: array, items: { type: string } }
+        skipped: { type: array, items: { type: string } }
+    Run:
+      type: object
+      properties:
+        runId: { type: string }
+        kind: { type: string, enum: [ZENGIN_INCOMING, BILLING_IMPORT, FX_RATES] }
+        startedAt: { type: string, format: date-time }
+        durationMs: { type: integer }
+        outcome: { type: string, enum: [SUCCESS, PARTIAL, FAILURE] }
+        consumer: { type: string, description: "Kong の利用者（X-Consumer-Username）" }
+        operator: { type: string, nullable: true, description: "連携コンソールから実行した行員（bank-ops 経由のみ）" }
+        requestId: { type: string }
+        summary: { type: string }

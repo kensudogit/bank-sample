@@ -196,7 +196,7 @@
     <action name="notices" class="com.example.bank.action.DepositAction" method="notices"/>
     <action name="fx-rates" class="com.example.bank.action.DepositAction" method="fxRates"/>
     <action name="fx-rate-update" class="com.example.bank.action.DepositAction" method="fxRateUpdate">
-      <interceptor-ref name="apiWriteStack"><param name="apiGuardWrite.roles">SUPERVISOR</param></interceptor-ref>
+      <interceptor-ref name="apiWriteStack"><param name="apiGuardWrite.roles">SUPERVISOR,INTEGRATION</param></interceptor-ref>
     </action>
     <action name="fx-exchange" class="com.example.bank.action.DepositAction" method="fxExchange">
       <interceptor-ref name="apiWriteStack"></interceptor-ref>
@@ -275,7 +275,7 @@
       <interceptor-ref name="apiWriteStack"><param name="apiGuardWrite.roles">SUPERVISOR</param></interceptor-ref>
     </action>
     <action name="remit-incoming" class="com.example.bank.action.PaymentAction" method="incoming">
-      <interceptor-ref name="apiWriteStack"><param name="apiGuardWrite.roles">SUPERVISOR</param></interceptor-ref>
+      <interceptor-ref name="apiWriteStack"><param name="apiGuardWrite.roles">SUPERVISOR,INTEGRATION</param></interceptor-ref>
     </action>
     <action name="remit-resolve" class="com.example.bank.action.PaymentAction" method="resolve">
       <interceptor-ref name="apiWriteStack"><param name="apiGuardWrite.roles">SUPERVISOR</param></interceptor-ref>
@@ -289,7 +289,7 @@
       <interceptor-ref name="apiWriteStack"></interceptor-ref>
     </action>
     <action name="billing-import" class="com.example.bank.action.PaymentAction" method="billingImport">
-      <interceptor-ref name="apiWriteStack"><param name="apiGuardWrite.roles">TELLER,SUPERVISOR</param></interceptor-ref>
+      <interceptor-ref name="apiWriteStack"><param name="apiGuardWrite.roles">TELLER,SUPERVISOR,INTEGRATION</param></interceptor-ref>
     </action>
     <action name="debit-requests" class="com.example.bank.action.PaymentAction" method="debitRequests"/>
     <action name="debit-process" class="com.example.bank.action.PaymentAction" method="debitProcess">

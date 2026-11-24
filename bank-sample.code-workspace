@@ -43,6 +43,15 @@
 			"**/.gradle": true,
 			"**/node_modules": true
 		},
-		"testing.automaticallyOpenTestResults": "openOnTestFailure"
+		"testing.automaticallyOpenTestResults": "openOnTestFailure",
+
+		// フロントエンド（Vitest 拡張）：frontend/vitest.config.mts だけを読み込み、テストの describe / it の行に ▷ を出す。
+		// ▷ のクリックでデバッグ実行（上の defaultGutterClickAction）、右クリックで通常の実行も選べる。
+		"vitest.configSearchPatternInclude": "**/vitest.config.mts",
+		"vitest.configSearchPatternExclude": "{**/node_modules/**,**/.*/**,**/build/**,**/*.d.ts}"
+	},
+	// このワークスペースで使う拡張機能（未インストールなら右下に案内が出る）
+	"extensions": {
+		"recommendations": ["vitest.explorer", "vscjava.vscode-java-pack", "vscjava.vscode-gradle"]
 	}
 }

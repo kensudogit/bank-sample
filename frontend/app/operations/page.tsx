@@ -1,5 +1,8 @@
 "use client";
 
+// 業務処理の画面（/operations、管理者専用）。夜間バッチの状況と手動実行、貸倒引当金の見直し、
+// 利息決算、休眠預金管理（休眠前通知・休眠化）を行う。実行内容はサーバー側で監査ログに記録される。
+
 import Link from "next/link";
 import { useState } from "react";
 import { RequireRole } from "@/components/AuthProvider";
@@ -23,6 +26,7 @@ export default function OperationsPage() {
   );
 }
 
+/** 夜間ジョブ名 → 日本語表示名 */
 const jobLabel: Record<string, string> = {
   DORMANCY: "休眠管理",
   INTEREST_SETTLEMENT: "利息決算",
@@ -41,6 +45,7 @@ const jobLabel: Record<string, string> = {
   REPORTS: "帳票出力",
 };
 
+/** 夜間バッチの実行履歴と「未実行のジョブを今すぐ実行」。同じジョブは 1 日 1 回だけ実行される（サーバー側で制御）。 */
 function NightlyJobs() {
   const { data, error } = useJobs();
   const [running, setRunning] = useState(false);
@@ -113,6 +118,7 @@ function NightlyJobs() {
   );
 }
 
+/** 利息決算：全口座の利息と源泉税を一括で記帳する。取り消せない処理のため、確認ボタンを挟んでから実行する。 */
 function InterestSettlement() {
   const [asOf, setAsOf] = useState(todayIso);
   const [confirming, setConfirming] = useState(false);
@@ -120,6 +126,7 @@ function InterestSettlement() {
   const [error, setError] = useState<unknown>(null);
   const [summary, setSummary] = useState<SettlementSummary | null>(null);
 
+  // 同じ期間の二重決算はサーバー側で防いでいる（決算済みの口座は「対象外」として返る）
   const run = async () => {
     if (running) return;
     setRunning(true);
@@ -211,12 +218,14 @@ function InterestSettlement() {
   );
 }
 
+/** 休眠預金管理：基準日時点の通知対象・休眠化対象・休眠中の口座を表示し、通知記録と休眠化を実行する。 */
 function DormancyManagement() {
   const [asOf, setAsOf] = useState(todayIso);
   const { data: report, error } = useDormancyReport(asOf);
   const [running, setRunning] = useState(false);
   const [runError, setRunError] = useState<unknown>(null);
   const [message, setMessage] = useState<string | null>(null);
+  // 未来日は対象の確認（シミュレーション）だけ。実行ボタンは本日以前でのみ有効にする。
   const isFuture = asOf > todayIso();
 
   const run = async () => {
@@ -234,6 +243,7 @@ function DormancyManagement() {
     }
   };
 
+  // 処理対象が 0 件なら実行ボタンを無効にする
   const pending = (report?.noticeTargets.length ?? 0) + (report?.dormancyTargets.length ?? 0);
 
   return (
@@ -268,6 +278,7 @@ function DormancyManagement() {
   );
 }
 
+/** 休眠管理の対象口座の一覧表。showDormantAt で休眠日の列を出す。 */
 function DormancyTable({ title, accounts, showDormantAt }: { title: string; accounts: Account[]; showDormantAt?: boolean }) {
   return (
     <div className="table-wrap" style={{ marginBottom: 16 }}>
@@ -306,6 +317,7 @@ function DormancyTable({ title, accounts, showDormantAt }: { title: string; acco
   );
 }
 
+/** 債務者区分 → 日本語表示名 */
 const classLabel: Record<string, string> = {
   NORMAL: "正常先", WATCH: "要注意先", SPECIAL: "要管理先", DOUBTFUL: "破綻懸念先", DEFACTO: "実質破綻先", BANKRUPT: "破綻先",
 };
@@ -316,6 +328,7 @@ function LoanProvisions() {
   const [running, setRunning] = useState(false);
   const [runError, setRunError] = useState<unknown>(null);
   const [result, setResult] = useState<Row | null>(null);
+  // 何度実行しても同じ日なら結果は同じ（冪等）なので、確認なしで実行できる
   const runNow = async () => {
     if (running) return;
     setRunning(true);

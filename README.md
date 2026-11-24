@@ -427,6 +427,17 @@ bank-sample/
    └─ lib/                   API クライアント・型・表示整形
 ```
 
+## 外部連携（Kong × MuleSoft）
+
+画面の API は **Kong Gateway**（OSS 3.9・DB-less）を通って Liberty ×2 に届きます（流量制限・ヘルスチェック付きの負荷分散）。
+他行の全銀データ・収納企業の請求データ・為替相場は、連携先が `http://127.0.0.1:8088/integration/v1/*` を API キーで呼び、
+**MuleSoft**（Mule 4 の Process API。ローカルでは同じ API 契約の互換コンテナ）が検証・変換して勘定系へ取り込みます。
+役席は ADMIN →「外部連携」から送信と実行履歴の確認ができます。
+
+初回は `.env` に `KONG_KEY_ZENGIN`・`KONG_KEY_BILLING`・`KONG_KEY_FX`・`KONG_KEY_OPS`・`MULE_CORE_PASSWORD` を追加し、
+`12_integration.sql` の適用と `python integration/scripts/set_service_password.py` で連携用アカウントを有効化します。
+手順・設計（ADR・経路・セキュリティ・運用）は [integration/README.md](integration/README.md) を参照してください。
+
 ## ローカル開発（コンテナを使わない部分）
 
 バックエンドのテスト（H2 の Oracle 互換モードで `db/init` の DDL/データを使用。同時振込テストを含む）:
@@ -439,6 +450,13 @@ WAR のビルド（`build/libs/bank-api.war`、`build/liberty/jdbc/ojdbc8-*.jar`
 
 ```bash
 cd backend && ./gradlew war copyJdbcDriver
+```
+
+フロントエンドのテスト（Vitest + Testing Library・jsdom。`app/`・`components/`・`lib/` の全ソースに対応するテストが
+`frontend/__tests__/` にあり、API は fetch のモックで応答するためバックエンドは不要）:
+
+```bash
+cd frontend && npm install && npm test
 ```
 
 フロントエンドを開発モードで起動（Liberty は compose で起動済みであること）:

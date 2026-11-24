@@ -116,6 +116,19 @@ class SecurityAndOperationsTest {
     }
 
     /** 連続して誤ったパスワードを入れると一定時間ロックされる。 */
+    /** 外部連携のサービスアカウントは既定で無効。パスワードを設定して有効化すると INTEGRATION ロールでログインできる */
+    @Test
+    void integrationServiceAccountIsDisabledUntilProvisioned() throws Exception {
+        assertError(ErrorCode.AUTH_FAILED, () -> auth.login("svc-mule", "disabled"));
+        assertError(ErrorCode.AUTH_FAILED, () -> auth.login("svc-mule", DEMO_PASSWORD));
+        sql("UPDATE app_user SET password_hash = '" + PasswordHasher.hash("Svc-Mule-Pass-2026") + "', enabled = 1 "
+                + "WHERE user_id = 'svc-mule'");
+        LoginUser svc = auth.login("svc-mule", "Svc-Mule-Pass-2026");
+        assertEquals(LoginUser.INTEGRATION, svc.getRole());
+        assertFalse(svc.isStaff());
+        assertFalse(svc.isCustomer());
+    }
+
     @Test
     void wrongPasswordsLockTheAccountTemporarily() {
         assertError(ErrorCode.AUTH_FAILED, () -> auth.login("nobody", DEMO_PASSWORD));

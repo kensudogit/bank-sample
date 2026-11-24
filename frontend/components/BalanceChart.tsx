@@ -1,24 +1,31 @@
 "use client";
 
+// 口座詳細画面の「残高推移」グラフ部品（外部ライブラリなしの SVG 描画）。
+// 期間（30 日・90 日・1 年）の取引明細の取引後残高を階段状の線でつなぎ、ホバーでその時点の残高を表示する。
+
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ErrorBox } from "@/components/Feedback";
 import { useTransactions } from "@/lib/api";
 import { formatMoney } from "@/lib/format";
 
+/** 選べる表示期間 */
 const RANGES = [
   { key: "30", label: "30日", days: 30 },
   { key: "90", label: "90日", days: 90 },
   { key: "365", label: "1年", days: 365 },
 ] as const;
 
+// グラフの高さと余白（幅はコンテナの実幅に合わせて ResizeObserver で追従する）
 const HEIGHT = 220;
 const PAD = { top: 16, right: 16, bottom: 28, left: 64 };
 
+/** グラフの 1 点：時刻（ミリ秒）とその時点の残高 */
 interface Point {
   t: number;
   balance: number;
 }
 
+/** ローカル時刻の日付を yyyy-MM-dd にする（API の from 条件に使う） */
 function isoDate(d: Date): string {
   const p = (n: number) => String(n).padStart(2, "0");
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
@@ -51,8 +58,10 @@ export function BalanceChart({ accountNo, currentBalance, currency = "JPY" }: { 
     d.setDate(d.getDate() - range.days);
     return isoDate(d);
   }, [range]);
+  // グラフ用に期間内の明細を最大 200 件取得する（取引履歴の表とはキャッシュキーが別）
   const { data, error } = useTransactions({ accountNo, from, page: 1, size: 200 });
 
+  // SVG を実際の表示幅で描くため、コンテナの幅の変化を監視する（最小 280px）
   const wrapRef = useRef<HTMLDivElement>(null);
   const [width, setWidth] = useState(640);
   useEffect(() => {
@@ -65,6 +74,7 @@ export function BalanceChart({ accountNo, currentBalance, currency = "JPY" }: { 
   // Hovered position: x in px and the balance that applies there (step-after)
   const [hover, setHover] = useState<{ x: number; idx: number } | null>(null);
 
+  // API の明細は新しい順なので古い順に並べ替え、末尾に「現在の残高」を足して今日まで線を伸ばす
   const points: Point[] = useMemo(() => {
     if (!data) return [];
     const start = new Date(`${from}T00:00:00`).getTime();
@@ -79,6 +89,7 @@ export function BalanceChart({ accountNo, currentBalance, currency = "JPY" }: { 
 
   const innerW = width - PAD.left - PAD.right;
   const innerH = HEIGHT - PAD.top - PAD.bottom;
+  // 縦軸の目盛り・座標変換・線と塗りつぶしの SVG パスを計算する。残高が一定のときは上下に余白を作る。
   const geo = useMemo(() => {
     if (points.length < 2) return null;
     const t0 = points[0].t;
@@ -102,6 +113,7 @@ export function BalanceChart({ accountNo, currentBalance, currency = "JPY" }: { 
     return { x, y, d, area, ticks, t0, t1 };
   }, [points, innerW, innerH]);
 
+  // ポインター位置の時刻に対応する残高（その時刻以前の最後の取引の残高）を探す
   const onMove = (e: React.PointerEvent<SVGRectElement>) => {
     if (!geo) return;
     const rect = (e.currentTarget.ownerSVGElement as SVGSVGElement).getBoundingClientRect();
@@ -144,6 +156,7 @@ export function BalanceChart({ accountNo, currentBalance, currency = "JPY" }: { 
                   <stop offset="100%" stopColor="var(--series-1)" stopOpacity="0" />
                 </linearGradient>
               </defs>
+              {/* 横方向の補助線 */}
               <g className="grid">
                 {geo.ticks.map((v) => (
                   <line key={v} x1={PAD.left} x2={width - PAD.right} y1={geo.y(v)} y2={geo.y(v)} />
@@ -160,6 +173,7 @@ export function BalanceChart({ accountNo, currentBalance, currency = "JPY" }: { 
                 <text x={PAD.left} y={HEIGHT - 8}>{fmtDate(geo.t0)}</text>
                 <text x={width - PAD.right} y={HEIGHT - 8} textAnchor="end">今日</text>
               </g>
+              {/* 残高の線の下を薄く塗りつぶした領域と、残高の線 */}
               <path className="area" d={geo.area} />
               <path className="line" d={geo.d} />
               {hp && (

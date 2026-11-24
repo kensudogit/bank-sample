@@ -1,5 +1,8 @@
 "use client";
 
+// 口座詳細画面に載せる、預金種類ごとの専用パネル群：
+// 定期預金（内容表示・中途解約）、通知預金（払出しの通知）、外貨預金（両替）、当座預金（当座貸越の利用状況）。
+
 import { useState } from "react";
 import { ErrorBox, Loading, SuccessBox } from "@/components/Feedback";
 import { ApiError, newIdempotencyKey, useCustomer } from "@/lib/api";
@@ -8,6 +11,7 @@ import { formatDate, formatDateTime, formatMoney, formatYen, normalizeAmount } f
 import type { Account } from "@/lib/types";
 
 /** Panels that depend on the deposit type (定期・通知・外貨・当座). */
+// 口座種別に応じて表示するパネルを切り替える（普通・貯蓄には専用パネルなし）
 export function DepositPanels({ account }: { account: Account }) {
   switch (account.accountType) {
     case "TIME":
@@ -23,6 +27,7 @@ export function DepositPanels({ account }: { account: Account }) {
   }
 }
 
+/** 定期預金の内容と中途解約。冪等キーはパネル表示中ずっと同じものを使い、二重解約を防ぐ。 */
 function TimeDepositPanel({ account }: { account: Account }) {
   const { data: td, error } = useTimeDeposit(account.accountNo);
   const [confirming, setConfirming] = useState(false);
@@ -91,6 +96,7 @@ function TimeDepositPanel({ account }: { account: Account }) {
   );
 }
 
+/** 通知預金：払出予定額の通知と、通知の一覧・取消。 */
 function NoticePanel({ account }: { account: Account }) {
   const { data: notices, error } = useNotices(account.accountNo);
   const [amount, setAmount] = useState("");
@@ -164,10 +170,12 @@ function NoticePanel({ account }: { account: Account }) {
   );
 }
 
+/** 外貨預金の両替：円 → 外貨（TTS で購入）と、外貨 → 円（TTB で売却）。 */
 function FxPanel({ account }: { account: Account }) {
   const { data: rates } = useFxRates();
   const { data: customer } = useCustomer(account.customerId);
   const rate = rates?.find((r) => r.currency === account.currency);
+  // 両替の相手口座は、同じ顧客名義の利用可能な円口座（普通・貯蓄・当座）
   const yenAccounts = customer?.accounts.filter(
     (a) => a.status === "ACTIVE" && a.currency === "JPY" && ["ORDINARY", "SAVINGS", "CHECKING"].includes(a.accountType),
   ) ?? [];
@@ -182,10 +190,12 @@ function FxPanel({ account }: { account: Account }) {
   const selectedYen = yenAccount || yenAccounts[0]?.accountNo || "";
   const foreign = Number(amount || 0);
   const applied = rate ? (direction === "BUY" ? Number(rate.tts) : Number(rate.ttb)) : 0;
+  // 円換算の概算：購入は銀行に有利なよう 1 円未満切上げ、売却は切捨て（サーバー側の計算と同じ丸め）
   const estimate = direction === "BUY" ? Math.ceil(foreign * applied) : Math.floor(foreign * applied);
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
+    // 外貨は補助単位（セント）まで、小数点以下 2 桁までに制限する
     if (!/^\d{1,9}(\.\d{1,2})?$/.test(amount)) {
       setErr(new ApiError(400, "VALIDATION_ERROR", "金額は小数点以下2桁までの数値で入力してください。"));
       return;
@@ -261,6 +271,7 @@ function FxPanel({ account }: { account: Account }) {
   );
 }
 
+/** 当座預金：当座貸越の極度額・利用額・支払可能額。残高がマイナスの分が貸越利用額。 */
 function OverdraftPanel({ account }: { account: Account }) {
   const used = Math.max(0, -account.balance);
   return (

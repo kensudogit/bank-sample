@@ -1,0 +1,77 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Process API：全銀システムからの被仕向振込（総合振込・120 桁固定長）の取込。
+  受信 → 構造・件数・合計の検証（NG なら 1 件も取り込まず 422）→ 当行宛てを 100 件ずつ勘定系の被仕向入金 API へ
+  → 入金・保留・重複・対象外を集計して返す。同じファイルの再送は勘定系が照会番号で重複と判定する（二重入金しない）。
+-->
+<mule xmlns="http://www.mulesoft.org/schema/mule/core"
+      xmlns:http="http://www.mulesoft.org/schema/mule/http"
+      xmlns:ee="http://www.mulesoft.org/schema/mule/ee/core"
+      xmlns:doc="http://www.mulesoft.org/schema/mule/documentation"
+      xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+      xsi:schemaLocation="
+        http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+        http://www.mulesoft.org/schema/mule/http http://www.mulesoft.org/schema/mule/http/current/mule-http.xsd
+        http://www.mulesoft.org/schema/mule/ee/core http://www.mulesoft.org/schema/mule/ee/core/current/mule-ee.xsd">
+
+  <flow name="zengin-incoming-flow" doc:name="POST /api/v1/zengin/incoming">
+    <http:listener config-ref="Integration_Listener" path="/api/v1/zengin/incoming" allowedMethods="POST" doc:name="受信">
+      <http:error-response statusCode="#[vars.problemStatus default 500]">
+        <http:body><![CDATA[#[payload]]]></http:body>
+        <http:headers><![CDATA[#[{ "Content-Type": "application/problem+json", "X-Request-ID": vars.requestId default "" }]]]></http:headers>
+      </http:error-response>
+    </http:listener>
+    <flow-ref name="begin-run" doc:name="実行の記録を開始"/>
+    <set-variable variableName="runKind" value="ZENGIN_INCOMING"/>
+
+    <!-- 固定長の検証と分解（文字コードは Content-Type の charset。UTF-8 / Shift_JIS） -->
+    <ee:transform doc:name="全銀データを検証・分解">
+      <ee:variables><ee:set-variable variableName="zengin" resource="dw/zengin-parse.dwl"/></ee:variables>
+    </ee:transform>
+    <choice doc:name="検証 NG なら取り込まない">
+      <when expression="#[!isEmpty(vars.zengin.errors)]">
+        <set-variable variableName="problemErrors" value="#[vars.zengin.errors]"/>
+        <raise-error type="APP:INVALID_INPUT" description="全銀データの形式・件数・合計金額に誤りがあるため、取り込みませんでした。"/>
+      </when>
+    </choice>
+
+    <ee:transform doc:name="勘定系の形式に変換">
+      <ee:variables><ee:set-variable variableName="mapped" resource="dw/zengin-to-incoming.dwl"/></ee:variables>
+    </ee:transform>
+
+    <!-- 勘定系の上限（1 回 100 件）に合わせて分割して送る。順番に送り、結果を入力の行と対応付ける -->
+    <set-variable variableName="coreResults" value="#[[]]"/>
+    <foreach collection="#[vars.mapped.items]" batchSize="${zengin.chunkSize}" doc:name="100 件ずつ">
+      <set-variable variableName="chunk" value="#[payload]"/>
+      <set-variable variableName="corePath" value="/remit-incoming"/>
+      <set-payload value="#[output application/java --- { items: vars.chunk.request }]"/>
+      <flow-ref name="core-post" doc:name="勘定系へ"/>
+      <set-variable variableName="coreResults" doc:name="結果を蓄積"
+        value="#[vars.coreResults ++ (vars.chunk map (c, i) -> { line: c.line, accountNo: c.request.accountNo, amount: c.request.amount as Number, referenceNo: c.request.referenceNo, status: payload[i].status, note: payload[i].note })]"/>
+    </foreach>
+
+    <ee:transform doc:name="取込結果">
+      <ee:message>
+        <ee:set-payload><![CDATA[%dw 2.0
+output application/json
+var all = (vars.coreResults ++ vars.mapped.rejected) orderBy $.line
+fun count(s) = sizeOf(all filter ($.status == s))
+---
+{
+  runId: vars.runId,
+  senderBankCode: vars.zengin.header.senderBankCode,
+  remitterNameKana: vars.zengin.header.remitterNameKana,
+  tradeDate: vars.zengin.header.tradeDate,
+  records: sizeOf(vars.zengin.records),
+  totalAmount: vars.zengin.totalAmount,
+  summary: { credited: count("CREDITED"), held: count("HELD"), duplicate: count("DUPLICATE"), rejected: count("REJECTED") },
+  results: all
+}]]></ee:set-payload>
+      </ee:message>
+    </ee:transform>
+    <set-variable variableName="runSummary"
+      value="#[payload.senderBankCode ++ ' ' ++ payload.records ++ ' 件：入金 ' ++ payload.summary.credited ++ '・保留 ' ++ payload.summary.held ++ '・重複 ' ++ payload.summary.duplicate ++ '・対象外 ' ++ payload.summary.rejected]"/>
+    <set-variable variableName="runOutcome" value="#[if (payload.summary.held + payload.summary.rejected &gt; 0) 'PARTIAL' else 'SUCCESS']"/>
+    <flow-ref name="end-run" doc:name="実行の記録を保存"/>
+  </flow>
+</mule>

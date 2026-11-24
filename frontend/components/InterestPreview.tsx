@@ -1,5 +1,7 @@
 "use client";
 
+// 口座の利息・源泉税の見込みを表示する部品。基準日を変えると再計算した結果を表示する。
+
 import { useState } from "react";
 import { ErrorBox, Loading } from "@/components/Feedback";
 import { useInterestPreview } from "@/lib/api";
@@ -31,7 +33,9 @@ export function InterestPreview({ accountNo, currency = "JPY" }: { accountNo: st
   );
 }
 
+/** 利息計算結果（計算期間・平均残高・税引前利息・国税・地方税・税引後利息）を表示する。口座解約時の結果表示にも使う。 */
 export function InterestTable({ result, currency = "JPY" }: { result: InterestResult; currency?: string }) {
+  // 前回の決算直後などで計算対象日が 0 日の場合は、表の代わりに説明文を出す
   if (result.days === 0) {
     return <p className="empty">前回の利息決算以降、基準日の前日までに計算対象の日がありません。</p>;
   }

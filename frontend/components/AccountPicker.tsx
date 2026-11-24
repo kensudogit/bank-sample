@@ -1,11 +1,14 @@
 "use client";
 
+// 口座の選択部品。ログイン利用者が顧客か行員かで、プルダウン選択と口座番号入力を切り替える。
+
 import { useEffect } from "react";
 import { useAuth } from "@/components/AuthProvider";
 import { useAccounts } from "@/lib/api";
 import { accountTypeLabel, formatMoney, normalizeAmount } from "@/lib/format";
 import type { Account } from "@/lib/types";
 
+// 既定では、利用可能な円建ての口座（定期預金を除く）だけを選択肢にする
 const DEFAULT_FILTER = (a: Account) => a.status === "ACTIVE" && a.currency === "JPY" && a.accountType !== "TIME";
 
 /**
@@ -35,6 +38,7 @@ export function AccountPicker({
     if (isCustomer && !value && first) onChange(first);
   }, [isCustomer, value, first, onChange]);
 
+  // 顧客：本人名義の口座だけをプルダウンで選ばせる（他人の口座番号を入力させない）
   if (isCustomer) {
     return (
       <label>
@@ -50,6 +54,7 @@ export function AccountPicker({
       </label>
     );
   }
+  // 行員：任意の口座番号を入力。全角数字で入力されても半角に正規化する
   return (
     <label>
       {label}

@@ -1,5 +1,8 @@
 "use client";
 
+// 経営ダッシュボードの画面（/mis、管理者専用）。情報系（DWH）の日次スナップショットから、
+// 主要指標・残高推移・期間損益・残高構成・月次サマリーを表示し、DWH への取込（バックフィル）も行う。
+
 import { useState } from "react";
 import { RequireRole } from "@/components/AuthProvider";
 import { ErrorBox, Loading, SuccessBox } from "@/components/Feedback";
@@ -19,12 +22,14 @@ export default function MisPage() {
   );
 }
 
+/** 選べる表示期間（最新の取込日から遡る日数） */
 const RANGES = [
   { days: 30, label: "30日" },
   { days: 90, label: "90日" },
   { days: 180, label: "180日" },
 ] as const;
 
+/** yyyy-MM-dd に日数を足す（ローカル時刻で計算し、yyyy-MM-dd で返す）。 */
 function addDays(iso: string, days: number): string {
   const d = new Date(`${iso}T00:00:00`);
   d.setDate(d.getDate() + days);
@@ -32,8 +37,10 @@ function addDays(iso: string, days: number): string {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
 }
 
+/** ダッシュボード本体。期間を切り替えても、新しい結果が届くまで前の表示を続ける。 */
 function MisDashboard() {
   const [days, setDays] = useState<number>(30);
+  // まず期間指定なしで取得して最新の取込日を知り、そこから表示期間の開始日を決めて取得し直す
   const probe = useMisDashboard();
   const lastDate: string | undefined = probe.data?.status?.lastDate ?? undefined;
   const from = lastDate ? addDays(lastDate, -(days - 1)) : undefined;
@@ -67,6 +74,7 @@ function MisDashboard() {
 
       {latest && (
         <>
+          {/* 主要指標（前日比は直前の取込日との比較） */}
           <section className="card">
             <h2>主要指標</h2>
             <dl className="stats">
@@ -104,6 +112,7 @@ function MisDashboard() {
             </dl>
           </section>
 
+          {/* 残高の構成：預金種類別・商品別・債務者区分別・顧客セグメント別 */}
           <section className="card">
             <h2>残高の構成（基準日）</h2>
             <div className="grid-2">
@@ -119,6 +128,7 @@ function MisDashboard() {
             </div>
           </section>
 
+          {/* 月次サマリー（月末時点の残高と月間の件数・収益） */}
           <section className="card">
             <h2>月次サマリー</h2>
             <div className="table-wrap">
@@ -157,6 +167,7 @@ function MisDashboard() {
   );
 }
 
+/** a ÷ b。分母が 0 以下なら 0 を返す（0 除算を避ける）。 */
 function ratio(a: unknown, b: unknown): number {
   const d = Number(b);
   return d > 0 ? Number(a) / d : 0;
@@ -164,6 +175,7 @@ function ratio(a: unknown, b: unknown): number {
 
 /** DWH の取込状況と、期間を指定した取込み（バックフィル・再取込）。 */
 function DwLoad({ status }: { status: Row }) {
+  // 取込は前日分まで（当日はまだ取引が確定していないため）。既定は直近 30 日。
   const yesterday = addDays(todayIso(), -1);
   const [from, setFrom] = useState(addDays(yesterday, -29));
   const [to, setTo] = useState(yesterday);
@@ -180,6 +192,7 @@ function DwLoad({ status }: { status: Row }) {
     try {
       const r = await infoApi.load(from, to);
       setDone(`${r.length} 日分を取り込みました（${from} 〜 ${to}）。`);
+      // 取込後は情報系の画面（MIS・顧客分析・帳票）のキャッシュをすべて無効化する
       invalidate("mis:*", "analytics:*", "report:*");
     } catch (x) {
       setErr(x);
@@ -212,6 +225,7 @@ function DwLoad({ status }: { status: Row }) {
   );
 }
 
+/** 指標 1 つ（値・前日比・補足）。前日比は増減で色を変える。 */
 function Kpi({ label, value, sub, delta, tone }: { label: string; value: string; sub?: string; delta?: number; tone?: "minus" }) {
   return (
     <div className="stat">
@@ -228,6 +242,7 @@ function Kpi({ label, value, sub, delta, tone }: { label: string; value: string;
 }
 
 /** Single-series horizontal bars (one hue, direct value labels, hover detail). */
+// 内訳を横棒グラフで表示する（最大値を 100% とした相対的な長さ）
 function Bars({ title, rows, value, label, sub }: {
   title: string; rows: Row[]; value: string; label: (r: Row) => string; sub: (r: Row) => string;
 }) {

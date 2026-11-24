@@ -1,14 +1,20 @@
+// 銀行業務 API（預金・融資・決済・リスク/AML・バッチ・情報系）のクライアントと、
+// それをキャッシュ付きで読む useXxx フック群。更新系は mutate() 経由で呼び、完了後に画面キャッシュを無効化する。
+
 import { mutate, qs, request } from "./api";
 import { useQuery } from "./query";
 
 /** Rows from the generic banking endpoints (column names in camelCase). */
+// 汎用エンドポイントは列が多岐にわたるため、厳密な型ではなくキー/値の連想配列として受ける
 export type Row = Record<string, any>;
 
+// GET：パラメータをクエリ文字列にして送る。POST：mutate() で包み、成功後にキャッシュを無効化させる。
 const get = <T = Row>(path: string, params: Record<string, string | number | undefined | null> = {}) =>
   request<T>(`${path}${qs(params)}`);
 const post = <T = Row>(path: string, body: unknown) => mutate(request<T>(path, body));
 
 // ---------------- deposits ----------------
+/** 預金業務 API：定期預金、通知預金、外貨両替・為替レート。資金が動く操作には冪等キーを付けて二重実行を防ぐ。 */
 export const depositApi = {
   timeRates: () => get<Row[]>("/time-rates"),
   openTime: (b: { sourceAccountNo: string; amount: string; termMonths: string; instruction: string; idempotencyKey: string }) =>
@@ -25,6 +31,7 @@ export const depositApi = {
 };
 
 // ---------------- loans ----------------
+/** 融資業務 API：申込 → 審査 → 決裁 → 契約 → 実行 → 返済・督促・償却の一連の流れと、融資管理（引当・条件変更など）。 */
 export const loanApi = {
   applications: (status?: string) => get<Row[]>("/loan-applications", { status }),
   application: (applicationId: string) => get("/loan-application", { applicationId }),
@@ -56,6 +63,7 @@ export const loanApi = {
 };
 
 // ---------------- payments ----------------
+/** 決済業務 API：他行振込（全銀ファイル作成・決済）、被仕向入金、口座振替、外国送金。 */
 export const paymentApi = {
   banks: () => get<Row[]>("/banks"),
   send: (b: Record<string, string>) => post("/remit-send", b),
@@ -85,6 +93,7 @@ export const paymentApi = {
 };
 
 // ---------------- risk / AML / CRM ----------------
+/** リスク管理・AML・顧客 360 度ビュー（CRM）API */
 export const riskApi = {
   dashboard: () => get("/risk-dashboard"),
   alerts: (status?: string) => get<Row[]>("/aml-alerts", { status }),
@@ -96,6 +105,7 @@ export const riskApi = {
 };
 
 // ---------------- bank batch ----------------
+/** 銀行バッチ API：ジョブ一覧・再実行、日次/月次の実行結果、帳票出力、残高証明書。 */
 export const batchApi = {
   catalog: () => get("/batch-catalog"),
   rerun: (jobName: string, runDate: string) => post("/batch-rerun", { jobName, runDate }),
@@ -107,7 +117,9 @@ export const batchApi = {
 };
 
 // ---------------- information systems (DWH / MIS / analytics / reports) ----------------
+/** 情報系の定型帳票の種類 */
 export type ReportType = "DEPOSIT_BALANCE" | "LOAN_BALANCE" | "TX_SUMMARY" | "KPI_TREND" | "CUSTOMER_ASSETS";
+/** 情報系 API：DWH への取込、経営情報（MIS）ダッシュボード、顧客分析、定型帳票。 */
 export const infoApi = {
   status: () => get("/dw-status"),
   load: (from: string, to: string) => post<Row[]>("/dw-load", { from, to }),
@@ -118,6 +130,8 @@ export const infoApi = {
 };
 
 // ---------------- cached readers ----------------
+// 以下はキャッシュ付きの読み取りフック。キャッシュキーは invalidate() で指定する名前と一致させること。
+// 情報系はキー（期間・日付）が変わっても前の結果を表示し続ける（keepPreviousWithin）。
 export const useTimeRates = () => useQuery("time-rates", depositApi.timeRates);
 export const useFxRates = () => useQuery("fx-rates", depositApi.fxRates);
 export const useTimeDeposit = (accountNo: string) => useQuery(`time:${accountNo}`, () => depositApi.timeDeposit(accountNo));

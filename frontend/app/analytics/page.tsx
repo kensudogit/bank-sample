@@ -1,5 +1,8 @@
 "use client";
 
+// 顧客分析の画面（/analytics、行員専用）。情報系（DWH）のデータから RFM でお客さまを分類し、
+// セグメント別の集計、クロスセル候補、離反リスク、顧客一覧を表示して CSV に出力できる。
+
 import Link from "next/link";
 import { useState } from "react";
 import { RequireRole } from "@/components/AuthProvider";
@@ -17,8 +20,10 @@ export default function AnalyticsPage() {
   );
 }
 
+/** 下段のタブ：クロスセル候補・離反リスク・顧客一覧 */
 type Tab = "crossSell" | "churn" | "all";
 
+/** 顧客分析の本体。基準日を変えると、その日時点の集計を取得し直す。 */
 function CustomerAnalytics() {
   const [date, setDate] = useState<string>("");
   const { data, error, loading } = useCustomerAnalytics(date || undefined);
@@ -26,6 +31,7 @@ function CustomerAnalytics() {
   const [segment, setSegment] = useState<string>("");
 
   if (!data) return error ? <ErrorBox error={error} /> : <Loading />;
+  // まだ一度も DWH に取り込まれていない場合は、取込方法の案内だけを表示する
   if (!data.date) {
     return (
       <>
@@ -41,6 +47,7 @@ function CustomerAnalytics() {
   const customers: Row[] = data.customers;
   const segments: Row[] = data.segments;
   const total = segments.reduce((s, r) => s + Number(r.customers), 0);
+  // セグメント表の「一覧」から選んだセグメントで顧客一覧を絞り込む
   const filtered = segment ? customers.filter((c) => c.segment === segment) : customers;
 
   return (
@@ -99,6 +106,7 @@ function CustomerAnalytics() {
 
 }
 
+/** ページ見出しと基準日の入力欄（空欄なら最新の取込日） */
 function Head({ shown, loading, date, onDate }: {
   shown: string | null; loading: boolean; date: string; onDate: (d: string) => void;
 }) {
@@ -117,6 +125,7 @@ function Head({ shown, loading, date, onDate }: {
   );
 }
 
+/** R または M スコア（1〜5）ごとの顧客数の分布を横棒で表示する。 */
 function Distribution({ title, rows, total }: { title: string; rows: Row[]; total: number }) {
   const max = Math.max(1, ...rows.map((r) => Number(r.customers)));
   return (
@@ -138,6 +147,7 @@ function Distribution({ title, rows, total }: { title: string; rows: Row[]; tota
   );
 }
 
+/** 顧客詳細（顧客 360 度ビュー）へのリンク */
 function CustomerLink({ r }: { r: Row }) {
   return (
     <Link href={`/customers/${r.customerId}`}>
@@ -146,6 +156,7 @@ function CustomerLink({ r }: { r: Row }) {
   );
 }
 
+/** クロスセル候補：未保有の商品のうち提案しやすいものと、その理由。 */
 function CrossSell({ rows, date }: { rows: Row[]; date: string }) {
   return (
     <>
@@ -178,6 +189,7 @@ function CrossSell({ rows, date }: { rows: Row[]; date: string }) {
   );
 }
 
+/** 離反リスク：取引が途絶えた、または預かり資産が大きく減ったお客さま。 */
 function Churn({ rows, date }: { rows: Row[]; date: string }) {
   return (
     <>
@@ -213,6 +225,7 @@ function Churn({ rows, date }: { rows: Row[]; date: string }) {
   );
 }
 
+/** 顧客一覧（RFM スコア付き）。セグメントで絞り込み、CSV 出力できる。 */
 function AllCustomers({ rows, date, segment, onSegment }: {
   rows: Row[]; date: string; segment: string; onSegment: (s: string) => void;
 }) {

@@ -1,14 +1,18 @@
 "use client";
 
+// 口座詳細画面の「取引履歴」部品。期間・取引種別での絞り込み、ページ送り、期首/期末残高と入出金合計の表示、CSV 出力を行う。
+
 import { useEffect, useState } from "react";
 import { ErrorBox, Loading } from "@/components/Feedback";
 import { bankApi, prefetchTransactions, useTransactions, type TransactionQuery } from "@/lib/api";
 import { creditTypes, formatDateTime, formatMoney, formatNumber, txTypeLabel } from "@/lib/format";
 import type { AccountTransaction, TxType } from "@/lib/types";
 
+/** 1 ページあたりの明細件数と、絞り込みに使える全取引種別 */
 const PAGE_SIZE = 20;
 const ALL_TYPES = Object.keys(txTypeLabel) as TxType[];
 
+/** 絞り込み条件（期間と取引種別。種別が空ならすべて） */
 interface Filter {
   from: string;
   to: string;
@@ -17,6 +21,7 @@ interface Filter {
 
 /** 取引履歴: 期間・種別で絞り込み、ページ送り、期首／期末残高と入出金合計、CSV 出力。 */
 export function TransactionHistory({ accountNo, currency = "JPY" }: { accountNo: string; currency?: string }) {
+  // draft は入力中の条件、filter は「検索」ボタンで確定した条件。入力のたびに API を呼ばないよう分けている。
   const [draft, setDraft] = useState<Filter>({ from: "", to: "", types: [] });
   const [filter, setFilter] = useState<Filter>(draft);
   const [page, setPage] = useState(1);
@@ -45,9 +50,11 @@ export function TransactionHistory({ accountNo, currency = "JPY" }: { accountNo:
     setPage(1);
   };
 
+  /** 取引種別のチェックボックスを切り替える */
   const toggleType = (t: TxType) =>
     setDraft((d) => ({ ...d, types: d.types.includes(t) ? d.types.filter((x) => x !== t) : [...d.types, t] }));
 
+  // CSV は画面の 1 ページ分ではなく、絞り込み条件に合う全件を 200 件ずつ取得して出力する
   const exportCsv = async () => {
     setExporting(true);
     setExportError(null);
@@ -106,6 +113,7 @@ export function TransactionHistory({ accountNo, currency = "JPY" }: { accountNo:
       {!data && !error && <Loading />}
       {data && (
         <div className={placeholder ? "is-stale" : undefined} aria-busy={placeholder}>
+          {/* 期間の期首残高・入出金合計・期末残高 */}
           <dl className="stats">
             <div className="stat">
               <dt>{filter.from ? `期首残高（${filter.from} 開始時）` : "期首残高"}</dt>
@@ -179,6 +187,10 @@ export function TransactionHistory({ accountNo, currency = "JPY" }: { accountNo:
   );
 }
 
+/**
+ * 明細を CSV にしてダウンロードさせる（入金額と出金額を別の列に分ける）。
+ * lib/csv.ts の汎用版とは列構成が異なるため、この画面専用に持っている。
+ */
 function downloadCsv(filename: string, rows: AccountTransaction[]) {
   const header = ["取引ID", "日時", "取引種別", "入金額", "出金額", "取引後残高", "相手口座", "メモ"];
   const lines = rows.map((t) => {

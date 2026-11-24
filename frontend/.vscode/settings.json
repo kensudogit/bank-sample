@@ -1,0 +1,8 @@
+{
+  // frontend フォルダを単独で開いた場合の設定。
+  // Vitest 拡張がこのフォルダの vitest.config.mts を読み込み、テストの describe / it の行番号の横に ▷ を出す。
+  "vitest.rootConfig": "vitest.config.mts",
+  "editor.glyphMargin": true,
+  "testing.gutterEnabled": true,
+  "testing.defaultGutterClickAction": "debug"
+}

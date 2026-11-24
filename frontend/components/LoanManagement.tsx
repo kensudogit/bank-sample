@@ -1,14 +1,19 @@
 "use client";
 
+// 融資詳細画面に載せる行員向けの「融資管理」パネル群。
+// 貸倒引当金の計上状況と履歴、担保の保全額と再評価、条件変更（リスケジュール）の履歴と実行フォームを表示する。
+
 import { useState } from "react";
 import { ErrorBox } from "@/components/Feedback";
 import { loanApi, useLoanManagement, type Row } from "@/lib/banking";
 import { borrowerClassLabel, formatDate, formatDateTime, formatPercent, formatYen, normalizeAmount } from "@/lib/format";
 
+/** 担保・保証の種類 → 日本語表示名 */
 const collateralLabel: Record<string, string> = {
   REAL_ESTATE: "不動産", DEPOSIT: "預金", SECURITIES: "有価証券", GUARANTOR: "個人保証", GUARANTEE_CO: "保証会社",
 };
 
+/** 親画面から受け取る実行ヘルパー。API を呼んで結果メッセージを表示し、成功したら true を返す。 */
 type Run = (fn: () => Promise<any>, done: string) => Promise<boolean | void>;
 
 /**
@@ -18,6 +23,7 @@ type Run = (fn: () => Promise<any>, done: string) => Promise<boolean | void>;
 export function LoanManagement({ loanId, loan, supervisor, run }: { loanId: string; loan: Row; supervisor: boolean; run: Run }) {
   const { data: m, error } = useLoanManagement(loanId);
   if (!m) return error ? <ErrorBox error={error} /> : null;
+  // 返済中・延滞中の融資だけが再評価・条件変更の対象（完済・償却済みは閲覧のみ）
   const live = loan.status === "ACTIVE" || loan.status === "DELINQUENT";
   const provisions: Row[] = m.provisions;
   const collaterals: Row[] = m.collaterals;
@@ -64,6 +70,7 @@ export function LoanManagement({ loanId, loan, supervisor, run }: { loanId: stri
         )}
       </section>
 
+      {/* 担保ごとの評価額・掛目・保全額。役席は再評価できる */}
       {collaterals.length > 0 && (
         <section className="card">
           <h2>担保・保証の保全額</h2>
@@ -81,6 +88,7 @@ export function LoanManagement({ loanId, loan, supervisor, run }: { loanId: stri
         </section>
       )}
 
+      {/* 条件変更の履歴（変更前 → 変更後） */}
       {(m.restructures as Row[]).length > 0 && (
         <section className="card table-wrap">
           <h2>条件変更の履歴</h2>
@@ -105,11 +113,13 @@ export function LoanManagement({ loanId, loan, supervisor, run }: { loanId: stri
         </section>
       )}
 
+      {/* リボルビング（カードローン等）には返済回数の概念がないため条件変更フォームを出さない */}
       {supervisor && live && loan.repaymentMethod !== "REVOLVING" && <RescheduleForm loan={loan} run={run} />}
     </>
   );
 }
 
+/** 担保 1 件の行。再評価の履歴はマウスを乗せると title で確認できる。再評価すると引当も見直される。 */
 function CollateralRow({ k, canRevalue, run }: { k: Row; canRevalue: boolean; run: Run }) {
   const [value, setValue] = useState("");
   const [note, setNote] = useState("");
@@ -147,8 +157,13 @@ function CollateralRow({ k, canRevalue, run }: { k: Row; canRevalue: boolean; ru
   );
 }
 
+/**
+ * 条件変更フォーム（役席のみ）。残り回数の延長や金利の引き下げで返済予定表を作り直す。
+ * 条件緩和した債権は要管理先以下の扱いになり引当に影響するため、実行前に確認ダイアログを出す。
+ */
 function RescheduleForm({ loan, run }: { loan: Row; run: Run }) {
   const remaining = (loan.schedule as Row[]).filter((s) => ["SCHEDULED", "PARTIAL", "OVERDUE"].includes(s.status)).length;
+  // 初期値は「現在の残り回数 + 5 年」（上限 35 年 = 420 回）
   const [months, setMonths] = useState(String(Math.min(420, remaining + 60)));
   const [rate, setRate] = useState("");
   const [note, setNote] = useState("");
@@ -177,6 +192,7 @@ function RescheduleForm({ loan, run }: { loan: Row; run: Run }) {
   );
 }
 
+/** 指標 1 つ（ラベル・値・補足）の表示 */
 function Stat({ label, value, sub }: { label: string; value: string; sub?: string }) {
   return (
     <div className="stat">

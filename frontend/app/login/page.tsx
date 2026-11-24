@@ -1,5 +1,7 @@
 "use client";
 
+// ログイン画面（/login）。認証後は ?next= で指定された元の画面へ戻す（初期パスワードならパスワード変更へ）。
+
 import { useRouter, useSearchParams } from "next/navigation";
 import { useEffect, useState } from "react";
 import { ThemeToggle, useAuth } from "@/components/AuthProvider";
@@ -8,6 +10,7 @@ import { IconCheck } from "@/components/Icons";
 import { Logo } from "@/components/Logo";
 import { authApi } from "@/lib/api";
 
+/** ログインページ。左側に銀行の紹介、右側にログインフォームを表示する。 */
 export default function LoginPage() {
   const router = useRouter();
   const params = useSearchParams();
@@ -18,9 +21,11 @@ export default function LoginPage() {
   const [error, setError] = useState<unknown>(null);
 
   // Only same-site relative paths (no open redirect)
+  // 戻り先は「/」で始まる自サイト内のパスだけ許可する（外部サイトへのオープンリダイレクト対策）
   const raw = params.get("next") ?? "/";
   const next = raw.startsWith("/") && !raw.startsWith("//") && raw !== "/login" ? raw : "/";
 
+  // ログイン済み（またはログイン成功直後）なら、戻り先かパスワード変更画面へ移動する
   useEffect(() => {
     if (user) router.replace(user.mustChangePassword ? "/password" : next);
   }, [user, next, router]);
@@ -34,6 +39,7 @@ export default function LoginPage() {
       setUser(await authApi.login(userId.trim(), password));
     } catch (err) {
       setError(err);
+      // 失敗時はパスワード欄を空にして再入力させる
       setPassword("");
     } finally {
       setSubmitting(false);

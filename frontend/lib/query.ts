@@ -1,3 +1,6 @@
+// GET 系 API の結果をメモリ上にキャッシュする、簡易版の stale-while-revalidate 実装（useQuery フック）。
+// 画面遷移時は前回のデータを即表示しつつ裏で再取得し、更新系 API の後は invalidate で残高などを最新化する。
+
 import { useCallback, useEffect, useReducer, useRef } from "react";
 
 /**
@@ -14,8 +17,13 @@ const FRESH_MS = 5_000;
 /** On returning to the tab, data older than this is re-fetched. */
 const FOCUS_REFRESH_MS = 30_000;
 
+/** キャッシュキーに対応するデータを取得する関数 */
 type Fetcher<T> = () => Promise<T>;
 
+/**
+ * キャッシュ 1 件分。data/error に最新結果、promise に実行中のリクエスト、
+ * listeners にこのキーを表示中のコンポーネントの再描画関数を持つ。
+ */
 interface Entry<T> {
   data?: T;
   error?: unknown;
@@ -25,10 +33,12 @@ interface Entry<T> {
   listeners: Set<() => void>;
 }
 
+// キー → キャッシュ項目。ページをまたいで共有し、永続化はしない（リロードで消える）
 const cache = new Map<string, Entry<unknown>>();
 /** Incremented by clearCache, so placeholders kept by mounted components are dropped too. */
 let generation = 0;
 
+/** キーに対応するキャッシュ項目を取得する（無ければ空の項目を作る）。 */
 function entry<T>(key: string): Entry<T> {
   let e = cache.get(key) as Entry<T> | undefined;
   if (!e) {
@@ -38,15 +48,19 @@ function entry<T>(key: string): Entry<T> {
   return e;
 }
 
+/** そのキーを表示中のコンポーネントに再描画を通知する。 */
 function notify(e: Entry<unknown>) {
   e.listeners.forEach((l) => l());
 }
 
+/** 取得から FRESH_MS 以内なら再取得不要とみなす。 */
 function isFresh(e: Entry<unknown>) {
   return e.data !== undefined && Date.now() - e.fetchedAt < FRESH_MS;
 }
 
 /** Starts (or joins) a request for `key`. A request superseded by `invalidate` never overwrites newer data. */
+// 実行中のリクエストがあれば相乗りして二重取得を防ぐ。
+// invalidate 後に古いリクエストが遅れて返っても、e.promise === p の確認で新しいデータを上書きしない。
 function revalidate<T>(key: string): Promise<T> | undefined {
   const e = entry<T>(key);
   if (e.promise) return e.promise;
@@ -75,6 +89,7 @@ function revalidate<T>(key: string): Promise<T> | undefined {
 }
 
 /** Warms the cache (e.g. on link hover) so the next page renders without waiting. */
+// リンクにマウスを乗せた時点で次ページのデータを先読みし、遷移後の待ち時間を減らす
 export function prefetch<T>(key: string, fetcher: Fetcher<T>): void {
   const e = entry<T>(key);
   e.fetcher ??= fetcher;
@@ -85,6 +100,8 @@ export function prefetch<T>(key: string, fetcher: Fetcher<T>): void {
  * Marks keys as stale. Keys currently on screen are re-fetched immediately; others on next use.
  * An in-flight request for the key is superseded, since it may have read data from before the change.
  */
+// 振込・入出金などの更新処理の後に呼び、関係する画面のデータを古い扱いにする。
+// "loans*" のように末尾 * でプレフィックス一致の一括指定ができる。
 export function invalidate(...keys: string[]): void {
   // "prefix*" matches every cached key starting with prefix ("*" alone matches everything)
   const matched = new Set<string>();
@@ -105,6 +122,7 @@ export function invalidate(...keys: string[]): void {
 }
 
 /** Drops every cached response (logout / user switch: never show one user's data to the next). */
+// generation を進めることで、各コンポーネントが保持している「前回データ」も無効になる
 export function clearCache(): void {
   generation++;
   cache.forEach((e) => {
@@ -116,6 +134,7 @@ export function clearCache(): void {
   cache.forEach((e) => notify(e));
 }
 
+/** useQuery の戻り値：データ・エラー・読み込み中フラグ・手動再取得関数 */
 export interface QueryState<T> {
   data: T | undefined;
   error: unknown;
@@ -126,6 +145,7 @@ export interface QueryState<T> {
   reload: () => void;
 }
 
+/** useQuery のオプション */
 export interface QueryOptions {
   /**
    * Paged / filtered lists: when the key changes (next page, new filter), keep showing the previous result
@@ -135,6 +155,11 @@ export interface QueryOptions {
   keepPreviousWithin?: string;
 }
 
+/**
+ * キャッシュ付きでデータを取得する React フック。
+ * キャッシュがあれば即座に返し、古ければ裏で再取得する。キーが変わると新しいキーで取得し直す。
+ * keepPreviousWithin を指定すると、ページ送りや絞り込みの間も前の結果を表示し続けてちらつきを防ぐ。
+ */
 export function useQuery<T>(key: string, fetcher: Fetcher<T>, options: QueryOptions = {}): QueryState<T> {
   const [, rerender] = useReducer((n: number) => n + 1, 0);
   const e = entry<T>(key);
@@ -173,6 +198,7 @@ export function useQuery<T>(key: string, fetcher: Fetcher<T>, options: QueryOpti
 }
 
 // Refresh what is on screen when the user comes back to the tab (balances may have changed elsewhere).
+// タブに戻ってきたとき、表示中で 30 秒以上古いデータだけ再取得する（SSR 時は document が無いので登録しない）
 if (typeof document !== "undefined") {
   document.addEventListener("visibilitychange", () => {
     if (document.visibilityState !== "visible") return;

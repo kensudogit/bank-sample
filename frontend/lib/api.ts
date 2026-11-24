@@ -1,3 +1,7 @@
+// 勘定系 API（口座・入出金・振込・顧客・利息・休眠・監査・ジョブ）のクライアント。
+// fetch の共通処理（エラー変換・401 検知・CSRF 対策ヘッダー）、キャッシュキー、キャッシュ付き読み取りフック、
+// 更新後のキャッシュ無効化（mutate）と冪等キー生成を提供する。
+
 import { clearCache, invalidate, prefetch, useQuery } from "./query";
 import type {
   Account,
@@ -23,6 +27,7 @@ import type {
 } from "./types";
 
 /** API error carrying the server's error code and field errors. */
+// 画面では code で分岐し、fieldErrors を各入力欄の下に表示する
 export class ApiError extends Error {
   constructor(
     readonly status: number,
@@ -35,11 +40,18 @@ export class ApiError extends Error {
   }
 }
 
+// next.config.ts の rewrites で Liberty の /bank/api/* に転送される、同一オリジンのパス
 const BASE = "/api/bank";
 
 /** Fired when the server says the session is gone (expired / logged out elsewhere). AuthProvider listens. */
+// セッション切れを検知したら window イベントで通知し、AuthProvider がログイン画面へ誘導する
 export const UNAUTHENTICATED_EVENT = "bank:unauthenticated";
 
+/**
+ * API 呼び出しの共通関数。body を渡すと POST（JSON）、省略すると GET になる。
+ * 応答は { data } / { error } 形式で、失敗時は ApiError を投げる。
+ * ログイン・パスワード変更以外で 401 が返ったらセッション切れイベントを発火する。
+ */
 export async function request<T>(path: string, body?: unknown): Promise<T> {
   const init: RequestInit = { cache: "no-store", headers: { Accept: "application/json" } };
   if (body !== undefined) {
@@ -78,6 +90,7 @@ export async function request<T>(path: string, body?: unknown): Promise<T> {
 }
 
 /** Builds a query string, skipping empty values. */
+// 未入力の検索条件を送らないことで、サーバー側で「条件なし」として扱わせる
 export function qs(params: Record<string, string | number | undefined | null>): string {
   const q = new URLSearchParams();
   for (const [k, v] of Object.entries(params)) {
@@ -87,6 +100,7 @@ export function qs(params: Record<string, string | number | undefined | null>): 
   return s ? `?${s}` : "";
 }
 
+/** 入金・出金リクエスト。idempotencyKey で通信再送時の二重入出金を防ぐ。 */
 export interface CashRequest {
   accountNo: string;
   amount: string;
@@ -94,6 +108,7 @@ export interface CashRequest {
   idempotencyKey: string;
 }
 
+/** 振込・振替リクエスト */
 export interface TransferRequest {
   fromAccountNo: string;
   toAccountNo: string;
@@ -104,6 +119,7 @@ export interface TransferRequest {
   ownAccountsOnly?: boolean;
 }
 
+/** 顧客登録（新規口座開設の前段）リクエスト */
 export interface RegisterCustomerRequest {
   customerType?: "INDIVIDUAL" | "CORPORATE";
   name: string;
@@ -117,6 +133,7 @@ export interface RegisterCustomerRequest {
   idempotencyKey: string;
 }
 
+/** 入出金明細の検索条件（期間・取引種別・ページ） */
 export interface TransactionQuery {
   accountNo: string;
   from?: string;
@@ -126,6 +143,7 @@ export interface TransactionQuery {
   size?: number;
 }
 
+/** 監査ログの検索条件 */
 export interface AuditQuery {
   from?: string;
   to?: string;
@@ -136,6 +154,7 @@ export interface AuditQuery {
   size?: number;
 }
 
+/** 認証 API。ログイン・ログアウト時はキャッシュを全消去し、前の利用者のデータが見えないようにする。 */
 export const authApi = {
   me: () => request<LoginUser | null>("/me"),
   login: async (userId: string, password: string) => {
@@ -154,6 +173,7 @@ export const authApi = {
     request<LoginUser>("/password-change", { currentPassword, newPassword }),
 };
 
+/** 勘定系の業務 API。更新系は mutate() で包み、成功・失敗にかかわらず画面のキャッシュを無効化する。 */
 export const bankApi = {
   searchAccounts: (q: { q?: string; page?: number; size?: number }) =>
     request<AccountPage>(`/accounts${qs({ q: q.q, page: q.page, size: q.size })}`),
@@ -195,6 +215,7 @@ export const bankApi = {
 };
 
 /** Cache keys for `useQuery` / `prefetch` (see lib/query.ts). */
+// キーに検索条件をすべて含めることで、条件ごとに別のキャッシュとして保持する
 export const queryKeys = {
   accounts: (q: { q?: string; page?: number; size?: number }) => `accounts:${q.q ?? ""}:${q.page ?? 1}:${q.size ?? 50}`,
   audit: (q: AuditQuery) => `audit:${JSON.stringify(q)}`,
@@ -210,6 +231,7 @@ export const queryKeys = {
 
 /** Cached readers: show the last data instantly, refresh in the background. */
 /** Account list page. Customers automatically get only their own accounts. */
+// 以下、各画面から使うキャッシュ付き読み取りフックと、ホバー時の先読み（prefetch）関数
 export const useAccounts = (q: { q?: string; page?: number; size?: number } = {}) =>
   useQuery(queryKeys.accounts(q), () => bankApi.searchAccounts(q), { keepPreviousWithin: "accounts" });
 export const prefetchAccounts = (q: { q?: string; page?: number; size?: number }) =>
@@ -239,6 +261,7 @@ export const useDormancyReport = (asOf: string) =>
  * unknown (a timeout or DUPLICATE_REQUEST can mean it went through). So every cached view is marked stale;
  * only the ones on screen are re-fetched right away.
  */
+// 更新系 API を包むヘルパー。失敗時もサーバー側で処理済みの可能性があるため、finally で必ず無効化する。
 export async function mutate<T>(op: Promise<T>): Promise<T> {
   try {
     return await op;
@@ -248,6 +271,7 @@ export async function mutate<T>(op: Promise<T>): Promise<T> {
 }
 
 /** One key per logical operation; reuse it on retry, renew it after success. */
+// 冪等キー：同じキーで再送されたリクエストはサーバーが二重実行しない。リトライ時は同じキーを使い、成功後に作り直す。
 export function newIdempotencyKey(): string {
   return crypto.randomUUID();
 }

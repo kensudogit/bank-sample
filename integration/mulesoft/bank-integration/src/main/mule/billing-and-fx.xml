@@ -1,0 +1,99 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Process API：
+  - 収納企業の請求データ（CSV）→ 勘定系の口座振替 請求取込
+  - 為替相場の提供元（JSON）→ 勘定系の公示相場の更新（当行が扱う USD・EUR のみ）
+-->
+<mule xmlns="http://www.mulesoft.org/schema/mule/core"
+      xmlns:http="http://www.mulesoft.org/schema/mule/http"
+      xmlns:ee="http://www.mulesoft.org/schema/mule/ee/core"
+      xmlns:doc="http://www.mulesoft.org/schema/mule/documentation"
+      xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+      xsi:schemaLocation="
+        http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+        http://www.mulesoft.org/schema/mule/http http://www.mulesoft.org/schema/mule/http/current/mule-http.xsd
+        http://www.mulesoft.org/schema/mule/ee/core http://www.mulesoft.org/schema/mule/ee/core/current/mule-ee.xsd">
+
+  <flow name="billing-import-flow" doc:name="POST /api/v1/billing/import">
+    <http:listener config-ref="Integration_Listener" path="/api/v1/billing/import" allowedMethods="POST" doc:name="受信">
+      <http:error-response statusCode="#[vars.problemStatus default 500]">
+        <http:body><![CDATA[#[payload]]]></http:body>
+        <http:headers><![CDATA[#[{ "Content-Type": "application/problem+json", "X-Request-ID": vars.requestId default "" }]]]></http:headers>
+      </http:error-response>
+    </http:listener>
+    <flow-ref name="begin-run"/>
+    <set-variable variableName="runKind" value="BILLING_IMPORT"/>
+    <ee:transform doc:name="CSV を読む">
+      <ee:message><ee:set-payload><![CDATA[%dw 2.0 input payload application/csv header=true output application/java --- payload]]></ee:set-payload></ee:message>
+    </ee:transform>
+    <ee:transform doc:name="検証・変換">
+      <ee:variables><ee:set-variable variableName="billing" resource="dw/billing-csv.dwl"/></ee:variables>
+    </ee:transform>
+    <choice>
+      <when expression="#[!isEmpty(vars.billing.errors)]">
+        <set-variable variableName="problemErrors" value="#[vars.billing.errors]"/>
+        <raise-error type="APP:INVALID_INPUT" description="請求データに誤りがあるため、取り込みませんでした。"/>
+      </when>
+    </choice>
+    <set-variable variableName="corePath" value="/billing-import"/>
+    <set-payload value="#[output application/java --- { items: vars.billing.items }]"/>
+    <flow-ref name="core-post" doc:name="勘定系へ"/>
+    <ee:transform doc:name="取込結果">
+      <ee:message><ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+{ runId: vars.runId, rows: sizeOf(payload), results: payload map { billerCode: $.billerCode, payerNumber: $.payerNumber, result: $.result } }]]></ee:set-payload></ee:message>
+    </ee:transform>
+    <set-variable variableName="runSummary" value="#[payload.rows ++ ' 行：取込 ' ++ sizeOf(payload.results filter ($.result == '取込')) ++ ' 件']"/>
+    <set-variable variableName="runOutcome" value="#[if (payload.results every ($.result == '取込')) 'SUCCESS' else 'PARTIAL']"/>
+    <flow-ref name="end-run"/>
+  </flow>
+
+  <flow name="fx-rates-flow" doc:name="POST /api/v1/fx/rates">
+    <http:listener config-ref="Integration_Listener" path="/api/v1/fx/rates" allowedMethods="POST" doc:name="受信">
+      <http:error-response statusCode="#[vars.problemStatus default 500]">
+        <http:body><![CDATA[#[payload]]]></http:body>
+        <http:headers><![CDATA[#[{ "Content-Type": "application/problem+json", "X-Request-ID": vars.requestId default "" }]]]></http:headers>
+      </http:error-response>
+    </http:listener>
+    <flow-ref name="begin-run"/>
+    <set-variable variableName="runKind" value="FX_RATES"/>
+    <ee:transform doc:name="検証">
+      <ee:variables><ee:set-variable variableName="fx"><![CDATA[%dw 2.0
+output application/java
+var rates = payload.rates default []
+---
+{
+  provider: payload.provider default "",
+  supported: rates filter (["USD", "EUR"] contains $.currency),
+  skipped: (rates filter !(["USD", "EUR"] contains $.currency)) map $.currency,
+  errors: (if (isEmpty(payload.provider default "") or sizeOf(payload.provider) > 40) [{ line: 0, message: "provider が正しくありません" }] else [])
+    ++ (if (isEmpty(rates) or sizeOf(rates) > 20) [{ line: 0, message: "rates は 1〜20 件で指定してください" }] else [])
+    ++ (rates map (r, i) -> {i: i, r: r} flatMap (x) -> (
+      (if (!((x.r.mid default "") as String matches /^[0-9]{1,6}(\.[0-9]{1,4})?$/)) [{ line: x.i + 1, message: "mid が正しくありません" }] else [])
+      ++ (if (!((x.r.spread default "") as String matches /^[0-9]{1,4}(\.[0-9]{1,4})?$/)) [{ line: x.i + 1, message: "spread が正しくありません" }] else [])
+    ))
+}]]></ee:set-variable></ee:variables>
+    </ee:transform>
+    <choice>
+      <when expression="#[!isEmpty(vars.fx.errors)]">
+        <set-variable variableName="problemErrors" value="#[vars.fx.errors]"/>
+        <raise-error type="APP:INVALID_INPUT" description="為替相場のデータに誤りがあります。"/>
+      </when>
+    </choice>
+    <foreach collection="#[vars.fx.supported]" doc:name="通貨ごとに更新">
+      <set-variable variableName="corePath" value="/fx-rate-update"/>
+      <set-payload value="#[output application/java --- { currency: payload.currency, ttm: payload.mid as String, spread: payload.spread as String }]"/>
+      <flow-ref name="core-post"/>
+    </foreach>
+    <ee:transform doc:name="更新結果">
+      <ee:message><ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+{ runId: vars.runId, provider: vars.fx.provider, updated: vars.fx.supported map $.currency, skipped: vars.fx.skipped }]]></ee:set-payload></ee:message>
+    </ee:transform>
+    <set-variable variableName="runSummary" value="#[vars.fx.provider ++ '：更新 ' ++ ((payload.updated joinBy '・') default '') ++ (if (isEmpty(payload.skipped)) '' else '（対象外 ' ++ (payload.skipped joinBy '・') ++ '）')]"/>
+    <set-variable variableName="runOutcome" value="SUCCESS"/>
+    <flow-ref name="end-run"/>
+  </flow>
+</mule>
