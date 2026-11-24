@@ -84,8 +84,9 @@ secrets() {
 
 cleanup() {
   log "廃止した API キーを削除（新しい kong・frontend が動いてから。古い kong はこの値がないと起動しない）"
-  for v in KONG_KEY_ZENGIN KONG_KEY_BILLING KONG_KEY_FX KONG_KEY_OPS; do railway variable delete "$v" --service kong --skip-deploys >/dev/null 2>&1 || true; done
-  railway variable delete INTEGRATION_OPS_KEY --service frontend --skip-deploys >/dev/null 2>&1 || true
+  for v in KONG_KEY_ZENGIN KONG_KEY_BILLING KONG_KEY_FX KONG_KEY_OPS; do railway variable delete "$v" --service kong >/dev/null; done
+  railway variable delete INTEGRATION_OPS_KEY --service frontend >/dev/null
+  echo "done（kong・frontend が再デプロイされる）"
 }
 
 migrate() {
