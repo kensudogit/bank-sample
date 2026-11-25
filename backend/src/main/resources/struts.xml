@@ -109,12 +109,22 @@
     </action>
 
     <!-- ===== Customers (own accounts only) and staff ===== -->
-    <action name="accounts" class="com.example.bank.action.AccountsAction"/>
-    <action name="account" class="com.example.bank.action.AccountDetailAction"/>
-    <action name="transactions" class="com.example.bank.action.TransactionsAction"/>
+    <!-- apiGuardRead.agentScope：AI Agent（行員の委任トークン）からも参照できる API と、そのスコープ。設定のない API は Agent から使えない -->
+    <action name="accounts" class="com.example.bank.action.AccountsAction">
+      <interceptor-ref name="apiReadStack"><param name="apiGuardRead.agentScope">Accounts.Read</param></interceptor-ref>
+    </action>
+    <action name="account" class="com.example.bank.action.AccountDetailAction">
+      <interceptor-ref name="apiReadStack"><param name="apiGuardRead.agentScope">Accounts.Read</param></interceptor-ref>
+    </action>
+    <action name="transactions" class="com.example.bank.action.TransactionsAction">
+      <interceptor-ref name="apiReadStack"><param name="apiGuardRead.agentScope">Transactions.Read</param></interceptor-ref>
+    </action>
     <action name="interest-preview" class="com.example.bank.action.InterestAction" method="preview"/>
     <action name="customer" class="com.example.bank.action.CustomersAction" method="detail">
-      <interceptor-ref name="apiReadStack"><param name="apiGuardRead.audit">true</param></interceptor-ref>
+      <interceptor-ref name="apiReadStack">
+        <param name="apiGuardRead.audit">true</param>
+        <param name="apiGuardRead.agentScope">Customers.Read</param>
+      </interceptor-ref>
     </action>
     <action name="transfer" class="com.example.bank.action.TransferAction">
       <interceptor-ref name="apiWriteStack"/>
@@ -122,7 +132,10 @@
 
     <!-- ===== Tellers and supervisors ===== -->
     <action name="customers" class="com.example.bank.action.CustomersAction">
-      <interceptor-ref name="apiReadStack"><param name="apiGuardRead.roles">TELLER,SUPERVISOR</param></interceptor-ref>
+      <interceptor-ref name="apiReadStack">
+        <param name="apiGuardRead.roles">TELLER,SUPERVISOR</param>
+        <param name="apiGuardRead.agentScope">Customers.Read</param>
+      </interceptor-ref>
     </action>
     <action name="deposit" class="com.example.bank.action.CashAction" method="deposit">
       <interceptor-ref name="apiWriteStack"><param name="apiGuardWrite.roles">TELLER,SUPERVISOR</param></interceptor-ref>
@@ -194,7 +207,9 @@
       <interceptor-ref name="apiWriteStack"></interceptor-ref>
     </action>
     <action name="notices" class="com.example.bank.action.DepositAction" method="notices"/>
-    <action name="fx-rates" class="com.example.bank.action.DepositAction" method="fxRates"/>
+    <action name="fx-rates" class="com.example.bank.action.DepositAction" method="fxRates">
+      <interceptor-ref name="apiReadStack"><param name="apiGuardRead.agentScope">Fx.Read</param></interceptor-ref>
+    </action>
     <action name="fx-rate-update" class="com.example.bank.action.DepositAction" method="fxRateUpdate">
       <interceptor-ref name="apiWriteStack"><param name="apiGuardWrite.roles">SUPERVISOR,INTEGRATION</param></interceptor-ref>
     </action>
@@ -290,6 +305,33 @@
     </action>
     <action name="billing-import" class="com.example.bank.action.PaymentAction" method="billingImport">
       <interceptor-ref name="apiWriteStack"><param name="apiGuardWrite.roles">TELLER,SUPERVISOR,INTEGRATION</param></interceptor-ref>
+    </action>
+    <!-- 課金の可視化・コスト予測。usage-ingest は Kong の http-log 専用（本文は JSON の配列。Kong の公開経路からは 404） -->
+    <action name="usage-ingest" class="com.example.bank.action.FinOpsAction" method="ingest">
+      <interceptor-ref name="apiGuardWrite"><param name="roles">PUBLIC</param></interceptor-ref>
+      <interceptor-ref name="defaultStack"/>
+    </action>
+    <!-- AI Agent のメーター（アプリのみのトークン・ロール AGENT。Agent の ID はトークンから決まる） -->
+    <action name="agent-usage" class="com.example.bank.action.FinOpsAction" method="agentUsage">
+      <interceptor-ref name="apiWriteStack"><param name="apiGuardWrite.roles">AGENT</param></interceptor-ref>
+    </action>
+    <action name="agent-budget" class="com.example.bank.action.FinOpsAction" method="agentBudget">
+      <interceptor-ref name="apiReadStack"><param name="apiGuardRead.roles">AGENT</param></interceptor-ref>
+    </action>
+    <action name="finops-summary" class="com.example.bank.action.FinOpsAction" method="summaryView">
+      <interceptor-ref name="apiReadStack"><param name="apiGuardRead.roles">SUPERVISOR</param></interceptor-ref>
+    </action>
+    <action name="finops-agent-runs" class="com.example.bank.action.FinOpsAction" method="agentRuns">
+      <interceptor-ref name="apiReadStack"><param name="apiGuardRead.roles">SUPERVISOR</param></interceptor-ref>
+    </action>
+    <action name="finops-rate-card" class="com.example.bank.action.FinOpsAction" method="rateCard">
+      <interceptor-ref name="apiReadStack"><param name="apiGuardRead.roles">SUPERVISOR</param></interceptor-ref>
+    </action>
+    <action name="finops-budget-update" class="com.example.bank.action.FinOpsAction" method="budgetUpdate">
+      <interceptor-ref name="apiWriteStack"><param name="apiGuardWrite.roles">SUPERVISOR</param></interceptor-ref>
+    </action>
+    <action name="finops-infra-sync" class="com.example.bank.action.FinOpsAction" method="infraSync">
+      <interceptor-ref name="apiWriteStack"><param name="apiGuardWrite.roles">SUPERVISOR</param></interceptor-ref>
     </action>
     <!-- 外部連携の実行履歴（MuleSoft のサービスアカウントだけ。冪等キー・再処理の状態を Oracle に保存する） -->
     <action name="integration-run-start" class="com.example.bank.action.IntegrationAction" method="runStart">

@@ -58,6 +58,7 @@ public class JobRunner {
     public static final String REPORTS = "REPORTS";
     public static final String AUDIT_ANCHOR = "AUDIT_ANCHOR";
     public static final String AUDIT_RETENTION = "AUDIT_RETENTION";
+    public static final String INFRA_COST_SYNC = "INFRA_COST_SYNC";
     /** この時刻より前はジョブを開始しない（前日分の取引が出そろってから処理する） */
     public static final LocalTime START_TIME = LocalTime.of(1, 0);
     /** 冪等キーの保存日数（これより古い再送は新しい要求として扱われる） */
@@ -223,6 +224,10 @@ public class JobRunner {
         jobs.add(new JobDef(AUDIT_RETENTION, "監査ログの保存期間管理", "毎日", daily, (d, by) -> {
             int deleted = audit.purgeExpired();
             return "保存期間を過ぎた監査ログ " + deleted + " 件を削除";
+        }));
+        jobs.add(new JobDef(INFRA_COST_SYNC, "インフラ費用の取込み（Railway）", "毎日（前日・当日分）", daily, (d, by) -> {
+            Map<String, Object> r = FinOpsService.getDefault().syncInfra(d.minusDays(1), d);
+            return "Railway 使用量 " + r.get("status") + (r.get("rows") == null ? "" : "（" + r.get("rows") + " 行）");
         }));
         // 情報系の取込みは、前日分の勘定系の処理（満期・返済・口座振替）が終わった後に行う
         jobs.add(new JobDef(DW_LOAD, "情報系の取込み", "毎日（前日分）", daily, (d, by) -> {

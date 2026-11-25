@@ -19,3 +19,4 @@ backend/bin/
 *.tfstate.*
 *.tfplan
 
+integration/agent/node_modules/

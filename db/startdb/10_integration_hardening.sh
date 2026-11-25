@@ -26,5 +26,10 @@ SQL
     echo "10_integration_hardening: applying 14_audit_protection.sh"
     bash "$INIT/14_audit_protection.sh"
   fi
-  echo "10_integration_hardening: up to date (integration_run=${tables:-?}, audit triggers=${triggers:-?} before this start)"
+  finops=$(count "SELECT COUNT(*) FROM dba_tables WHERE owner = 'BANK' AND table_name = 'AGENT_RUN';")
+  if [ "$finops" = "0" ]; then
+    echo "10_integration_hardening: applying 15_agent_finops.sql"
+    NLS_LANG=AMERICAN_AMERICA.AL32UTF8 sqlplus -s / as sysdba @"$INIT/15_agent_finops.sql" </dev/null
+  fi
+  echo "10_integration_hardening: up to date (agent_run=${finops:-?}) (integration_run=${tables:-?}, audit triggers=${triggers:-?} before this start)"
 )

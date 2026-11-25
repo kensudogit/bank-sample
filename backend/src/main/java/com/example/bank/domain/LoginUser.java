@@ -18,6 +18,8 @@ public final class LoginUser implements Serializable {
      * AUTHENTICATED（ログイン済みなら誰でも）の API も使えない（口座一覧などを読めないようにする最小権限）。
      */
     public static final String INTEGRATION = "INTEGRATION";
+    /** AI Agent のメーター（アプリのみのトークン。DB の利用者ではない） */
+    public static final String AGENT = "AGENT";
     /** 夜間バッチなどシステム処理の監査ログ上の利用者 */
     public static final LoginUser SYSTEM = new LoginUser("SYSTEM", "システム", "SYSTEM", null, false);
 

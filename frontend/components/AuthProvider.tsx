@@ -194,6 +194,7 @@ function Nav({ user, pathname }: { user: LoginUser; pathname: string }) {
       )}
       {user.staff && (
         <>
+          {item("/assistant", "AI アシスタント", <IconTarget />)}
           <div className="nav-section">INFORMATION</div>
           {user.role === "SUPERVISOR" && item("/mis", "経営ダッシュボード", <IconDashboard />)}
           {item("/analytics", "顧客分析", <IconTarget />)}
@@ -208,6 +209,7 @@ function Nav({ user, pathname }: { user: LoginUser; pathname: string }) {
           {item("/operations", "業務処理", <IconCog />)}
           {item("/batch", "銀行バッチ", <IconLayers />)}
           {item("/integration", "外部連携", <IconPlug />)}
+          {user.role === "SUPERVISOR" && item("/finops", "コスト・課金", <IconChart />)}
           {item("/audit", "監査ログ", <IconShield />)}
         </>
       )}

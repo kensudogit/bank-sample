@@ -28,6 +28,9 @@ locals {
     auth = {
       root = "integration/auth-server", watch = ["/integration/auth-server/**"], healthcheck = "/live", timeout = 60
     }
+    agent = {
+      root = "integration/agent", watch = ["/integration/agent/**"], healthcheck = "/live", timeout = 60
+    }
   }
 
   # 秘密でない環境変数（サービス → 変数名 → 値）
@@ -43,6 +46,8 @@ locals {
       BANK_JOBS_ENABLED  = "true"
       PORT               = "9080"
       TZ                 = "Asia/Tokyo"
+      # Railway の使用量（コスト・課金）。トークン（RAILWAY_API_TOKEN）は秘密情報として deploy/railway.sh で設定する
+      RAILWAY_PROJECT_ID = railway_project.bank_sample.id
     }
     kong = {
       PORT                          = "8000"
@@ -66,6 +71,8 @@ locals {
       AUTH_MODE                     = "local"
       KONG_TOKEN_AUDIENCE           = "api://bank-integration"
       KONG_TRACING_INSTRUMENTATIONS = "off"
+      KONG_AGENT_HOST               = "agent.railway.internal"
+      KONG_METERING_URL             = "http://liberty.railway.internal:9080/bank/api/usage-ingest"
     }
     frontend = {
       PORT                    = "3000"
@@ -76,6 +83,8 @@ locals {
       INTEGRATION_TOKEN_URL   = "http://kong.railway.internal:8000/oauth2/token"
       INTEGRATION_CLIENT_ID   = "bank-ops"
       PUBLIC_ORIGIN           = var.public_origin
+      AGENT_RUNS_URL          = "http://kong.railway.internal:8000/agent/v1/runs"
+      AGENT_CONSOLE_CLIENT_ID = "bank-console"
     }
     mule = {
       PORT                 = "8081"
@@ -87,9 +96,22 @@ locals {
       TZ                   = "Asia/Tokyo"
     }
     auth = {
-      PORT          = "8080"
-      AUTH_ISSUER   = "https://auth.bank-sample.local"
-      AUTH_AUDIENCE = "api://bank-integration"
+      PORT                = "8080"
+      AUTH_ISSUER         = "https://auth.bank-sample.local"
+      AUTH_AUDIENCE       = "api://bank-integration"
+      AUTH_BRIDGE_CLIENTS = "bank-console"
+      AUTH_OBO            = "bank-agent>api://bank-agent>api://bank-core:Accounts.Read+Transactions.Read+Customers.Read+Fx.Read"
+    }
+    agent = {
+      PORT              = "8090"
+      AGENT_CLIENT_ID   = "bank-agent"
+      AUTH_TOKEN_URL    = "http://kong.railway.internal:8000/oauth2/token"
+      AUTH_JWKS_URL     = "http://auth.railway.internal:8080/.well-known/jwks.json"
+      AUTH_ISSUER       = "https://auth.bank-sample.local"
+      GATEWAY_URL       = "http://kong.railway.internal:8000"
+      AGENT_MODEL       = "claude-opus-5-5"
+      AGENT_EFFORT      = "medium"
+      AGENT_MAX_RUN_JPY = "50"
     }
     redis = {}
   }

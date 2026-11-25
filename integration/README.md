@@ -21,6 +21,8 @@
 | 勘定系 | 業務ルール・二重入金の防止（一意制約）・実行履歴と二者承認の保存・監査ログ（改ざん防止・保存期間） | Liberty（ロール `INTEGRATION` のサービスアカウント `svc-mule`）・Oracle |
 
 - 強化項目（実行履歴の永続化・二重入金防止・職務分離・ゲートウェイ迂回防止など 12 項目）の実装と確認方法：[docs/hardening.md](docs/hardening.md)
+- AI アシスタント（Claude）の認証認可（Entra ID 連携・Agent 経由のアクセス制御・追跡）：[docs/agent-auth-design.md](docs/agent-auth-design.md)
+- 課金の可視化・コスト予測（配賦・予算・Railway）：[docs/finops-cost-model.md](docs/finops-cost-model.md)
 - 配置の判断：[ADR-001](docs/ADR-001-gateway-and-integration.md)・[ADR-002](docs/ADR-002-integration-hardening.md)
 - API ごとの経路：[docs/api-routing-matrix.md](docs/api-routing-matrix.md)／認証・認可：[docs/security-design.md](docs/security-design.md)
 - 運用：[docs/operations-runbook.md](docs/operations-runbook.md)／本番化の条件：[docs/acceptance-checklist.md](docs/acceptance-checklist.md)
@@ -31,6 +33,7 @@
 
    ```bash
    bash integration/scripts/gen-secrets.sh >> .env
+   bash integration/scripts/gen-agent-secrets.sh >> .env      # AI アシスタント（テナント ID・画面と Agent のクライアント）
    python -c "import secrets;print('MULE_CORE_PASSWORD=Mule-'+secrets.token_urlsafe(18)+'9a')" >> .env
    ```
 

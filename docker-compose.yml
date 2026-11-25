@@ -58,6 +58,9 @@ services:
       BANK_DB_PASSWORD: ${BANK_DB_PASSWORD:?set BANK_DB_PASSWORD in .env}
       BANK_GATEWAY_SECRET: ${BANK_GATEWAY_SECRET:?run integration/scripts/gen-secrets.sh}
       TZ: Asia/Tokyo
+      # Railway usage for the cost dashboard (optional; an account/workspace token). Unset: the sync reports NOT_CONFIGURED
+      RAILWAY_API_TOKEN: ${RAILWAY_API_TOKEN:-}
+      RAILWAY_PROJECT_ID: ${RAILWAY_PROJECT_ID:-}
       # Nightly batch (dormancy, maturities, loans, direct debit, ledger check, audit anchor / retention, ...) from 01:00.
       # Safe with several instances: each job runs once per day (JOB_RUN primary key)
       BANK_JOBS_ENABLED: ${BANK_JOBS_ENABLED:-true}
@@ -92,6 +95,10 @@ services:
       INTEGRATION_CLIENT_SECRET: ${OAUTH_SECRET_OPS:?run integration/scripts/gen-secrets.sh}
       OPERATOR_TOKEN_SECRET: ${OPERATOR_TOKEN_SECRET:?run integration/scripts/gen-secrets.sh}
       CONSOLE_CSRF_SECRET: ${CONSOLE_CSRF_SECRET:?run integration/scripts/gen-secrets.sh}
+      # AI assistant: delegated user token via the console client (session bridge; Entra ID sign-in in production) -> Kong -> agent
+      AGENT_RUNS_URL: http://kong:8000/agent/v1/runs
+      AGENT_CONSOLE_CLIENT_ID: bank-console
+      AGENT_CONSOLE_CLIENT_SECRET: ${OAUTH_SECRET_CONSOLE:?run integration/scripts/gen-agent-secrets.sh}
       # Origins the browser may send state-changing requests from (exact match)
       PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:-http://localhost:3000,http://127.0.0.1:3000}
     depends_on:
@@ -116,7 +123,13 @@ services:
       AUTH_ISSUER: https://auth.bank-sample.local
       AUTH_AUDIENCE: api://bank-integration
       AUTH_SIGNING_KEY: ${AUTH_SIGNING_KEY:?run integration/scripts/gen-secrets.sh}
-      AUTH_CLIENTS: ${AUTH_CLIENTS:?run integration/scripts/gen-secrets.sh}
+      # 連携先・連携コンソールに加えて、画面（bank-console）と AI Agent（bank-agent）のクライアント
+      AUTH_CLIENTS: ${AUTH_CLIENTS:?run integration/scripts/gen-secrets.sh},${AUTH_CLIENTS_AGENT:?run integration/scripts/gen-agent-secrets.sh}
+      AUTH_TENANT_ID: ${AUTH_TENANT_ID:?run integration/scripts/gen-agent-secrets.sh}
+      # 画面だけが、行員の委任トークン（Agent 呼び出し用）を得られる（Entra ID ではサインインに置き換わる）
+      AUTH_BRIDGE_CLIENTS: bank-console
+      # Agent が行員のトークンを勘定系向けに交換できる（On-Behalf-Of）。スコープは Agent に同意した参照系だけ
+      AUTH_OBO: bank-agent>api://bank-agent>api://bank-core:Accounts.Read+Transactions.Read+Customers.Read+Fx.Read
     networks: [integration, observability]
     restart: unless-stopped
 
@@ -171,6 +184,9 @@ services:
       KONG_REDIS_PASSWORD: ${REDIS_PASSWORD:?run integration/scripts/gen-secrets.sh}
       # Set to http://otel-collector:4318/v1/traces (and KONG_TRACING_INSTRUMENTATIONS=all) with the observability profile
       KONG_OTEL_ENDPOINT: ${KONG_OTEL_ENDPOINT:-}
+      # Tenant allow-list (tid) for agent / console tokens, and per-request metering for chargeback (http-log -> Liberty)
+      KONG_ALLOWED_TENANT: ${AUTH_TENANT_ID:?run integration/scripts/gen-agent-secrets.sh}
+      KONG_METERING_URL: http://bank-sample-liberty-1:9080/bank/api/usage-ingest
     ports:
       # Partner entry point (/oauth2/token, /integration/v1/*). The /bank/api routes only answer to Host: kong
       - "127.0.0.1:${KONG_HOST_PORT:-8088}:8000"
@@ -212,6 +228,32 @@ services:
         condition: service_healthy
     networks: [integration, observability]
     restart: unless-stopped
+
+  # AI assistant (Claude via the Anthropic SDK). Called through Kong with a delegated user token; exchanges it
+  # On-Behalf-Of for the core API (read-only scopes) and reports runs / token usage to the core for chargeback.
+  agent:
+    build:
+      context: ./integration/agent
+    image: bank-sample-agent
+    environment:
+      AGENT_CLIENT_ID: bank-agent
+      AGENT_CLIENT_SECRET: ${OAUTH_SECRET_AGENT:?run integration/scripts/gen-agent-secrets.sh}
+      AUTH_TOKEN_URL: http://kong:8000/oauth2/token
+      AUTH_JWKS_URL: http://auth:8080/.well-known/jwks.json
+      AUTH_ISSUER: https://auth.bank-sample.local
+      AUTH_ALLOWED_TENANTS: ${AUTH_TENANT_ID:?run integration/scripts/gen-agent-secrets.sh}
+      GATEWAY_URL: http://kong:8000
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:?set ANTHROPIC_API_KEY in .env}
+      AGENT_MODEL: ${AGENT_MODEL:-claude-opus-5-5}
+      AGENT_EFFORT: ${AGENT_EFFORT:-medium}
+      AGENT_MAX_RUN_JPY: ${AGENT_MAX_RUN_JPY:-50}
+    depends_on:
+      kong:
+        condition: service_healthy
+    networks: [integration, observability]
+    restart: unless-stopped
+
+  # Load balancer (nginx)
 
   # Load balancer (nginx): 127.0.0.1:3000 for browsers (the API is reached only through the frontend and Kong)
   lb:

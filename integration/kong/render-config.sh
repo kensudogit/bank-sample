@@ -11,6 +11,11 @@
 #   KONG_MTLS_CA_CERT / KONG_MTLS_CLIENT_CERT / KONG_MTLS_CLIENT_KEY   Kong → MuleSoft の mTLS（PEM を Base64 で 1 行）
 #   KONG_REDIS_HOST / KONG_REDIS_PORT / KONG_REDIS_PASSWORD   レート制限の共有先（未設定なら各台で数える。警告を出す）
 #   KONG_OTEL_ENDPOINT      OpenTelemetry Collector の OTLP/HTTP（例 http://otel-collector:4318/v1/traces。未設定なら送らない）
+#   KONG_METERING_URL       全要求の記録（http-log）の送り先。勘定系の /bank/api/usage-ingest（未設定なら送らない）
+#   KONG_ALLOWED_TENANT     受け付けるテナント（tid）。local は auth の AUTH_TENANT_ID と同じ値、entra は ENTRA_TENANT_ID
+#   KONG_AGENT_AUDIENCE / KONG_CORE_AUDIENCE   Agent の API・勘定系の API（既定 api://bank-agent・api://bank-core）
+#   KONG_CLIENT_ID_CONSOLE / _AGENT   画面・Agent のクライアント ID（local の既定は bank-console・bank-agent）
+#   KONG_AGENT_HOST         Agent のホスト名（既定 agent）
 #   KONG_LIBERTY_TARGETS / KONG_INTERNAL_HOSTS / KONG_MULE_HOST / KONG_AUTH_HOST   転送先（既定は docker compose の構成）
 #   引数 --render-only：Kong を起動せず /tmp/kong.yml（または KONG_RENDER_OUT）を作るだけ（CI の検証用）
 set -eu
@@ -61,6 +66,8 @@ case "$AUTH_MODE" in
     AUDIENCE="${KONG_TOKEN_AUDIENCE:-api://bank-integration}"
     ID_ZENGIN="${KONG_CLIENT_ID_ZENGIN:-zengin-network}"; ID_BILLING="${KONG_CLIENT_ID_BILLING:-billing-agency}"
     ID_FX="${KONG_CLIENT_ID_FX:-fx-provider}"; ID_OPS="${KONG_CLIENT_ID_OPS:-bank-ops}"
+    ID_CONSOLE="${KONG_CLIENT_ID_CONSOLE:-bank-console}"; ID_AGENT="${KONG_CLIENT_ID_AGENT:-bank-agent}"
+    TENANT="${KONG_ALLOWED_TENANT:-}"
     ;;
   entra)
     # Entra ID の v2.0 アクセストークン（アプリ登録のマニフェストで accessTokenAcceptedVersion: 2）
@@ -70,12 +77,17 @@ case "$AUTH_MODE" in
     AUDIENCE="${KONG_TOKEN_AUDIENCE:-}"; [ -n "$AUDIENCE" ] || fail "KONG_TOKEN_AUDIENCE (Application ID URI or client ID of the API) is required"
     ID_ZENGIN="${KONG_CLIENT_ID_ZENGIN:-}"; ID_BILLING="${KONG_CLIENT_ID_BILLING:-}"
     ID_FX="${KONG_CLIENT_ID_FX:-}"; ID_OPS="${KONG_CLIENT_ID_OPS:-}"
+    ID_CONSOLE="${KONG_CLIENT_ID_CONSOLE:-}"; ID_AGENT="${KONG_CLIENT_ID_AGENT:-}"
+    TENANT="$tenant"
     ;;
   *) fail "AUTH_MODE must be local or entra" ;;
 esac
 check_name KONG_TOKEN_ISSUER "$ISSUER"
 check_name KONG_TOKEN_AUDIENCE "$AUDIENCE"
-for pair in "ZENGIN:$ID_ZENGIN" "BILLING:$ID_BILLING" "FX:$ID_FX" "OPS:$ID_OPS"; do
+case "$TENANT" in ''|*[!0-9a-f-]*) fail "KONG_ALLOWED_TENANT must be the tenant GUID (same as AUTH_TENANT_ID)" ;; esac
+AGENT_AUDIENCE="${KONG_AGENT_AUDIENCE:-api://bank-agent}"; check_name KONG_AGENT_AUDIENCE "$AGENT_AUDIENCE"
+CORE_AUDIENCE="${KONG_CORE_AUDIENCE:-api://bank-core}"; check_name KONG_CORE_AUDIENCE "$CORE_AUDIENCE"
+for pair in "ZENGIN:$ID_ZENGIN" "BILLING:$ID_BILLING" "FX:$ID_FX" "OPS:$ID_OPS" "CONSOLE:$ID_CONSOLE" "AGENT:$ID_AGENT"; do
   check_name "KONG_CLIENT_ID_${pair%%:*}" "${pair#*:}"
 done
 
@@ -105,15 +117,43 @@ else
   OTEL=""
 fi
 
+if [ -n "${KONG_METERING_URL:-}" ]; then
+  check_name KONG_METERING_URL "$KONG_METERING_URL"
+  # 全要求の記録（課金の配賦）。トークン・Cookie・URL・クエリ（口座番号など）は送らない
+  METERING="  - name: http-log
+    config:
+      http_endpoint: \"$KONG_METERING_URL\"
+      method: POST
+      content_type: application/json
+      timeout: 5000
+      keepalive: 60000
+      headers: { X-Bank-Gateway-Secret: \"$KONG_GATEWAY_SECRET\", X-Requested-With: XMLHttpRequest }
+      queue: { max_batch_size: 50, max_coalescing_delay: 5, max_retry_time: 60 }
+      custom_fields_by_lua:
+        request.headers: \"return nil\"
+        response.headers: \"return nil\"
+        request.querystring: \"return nil\"
+        request.uri: \"return nil\"
+        request.url: \"return nil\"
+        upstream_uri: \"return nil\"
+        bank.user: \"return kong.request.get_header('X-Bank-Delegated-User')\"
+        bank.request_id: \"return kong.request.get_header('X-Request-ID')\"
+        bank.caller: \"return kong.request.get_header('X-Bank-Caller')\""
+else
+  METERING=""
+fi
+
 TARGETS=$(to_list "${KONG_LIBERTY_TARGETS:-bank-sample-liberty-1:9080,bank-sample-liberty-2:9080}" '{ target: "%s" }')
 HOSTS=$(to_list "${KONG_INTERNAL_HOSTS:-kong,kong:8000}" '"%s"')
 MULE_HOST="${KONG_MULE_HOST:-mule}"; check_name KONG_MULE_HOST "$MULE_HOST"
 AUTH_HOST="${KONG_AUTH_HOST:-auth}"; check_name KONG_AUTH_HOST "$AUTH_HOST"
+AGENT_HOST="${KONG_AGENT_HOST:-agent}"; check_name KONG_AGENT_HOST "$AGENT_HOST"
 
 OUT="${KONG_RENDER_OUT:-/tmp/kong.yml}"
 # 値の中の & や \ を特別扱いしないよう、awk で文字列として置き換える
 GATEWAY_SECRET="$KONG_GATEWAY_SECRET" PUBLIC_KEY="$PUBLIC_KEY" MTLS_CA="$MTLS_CA" MTLS_CERT="$MTLS_CERT" MTLS_KEY="$MTLS_KEY" \
-STORE="$STORE" OTEL="$OTEL" TARGETS="$TARGETS" HOSTS="$HOSTS" MULE_HOST="$MULE_HOST" AUTH_HOST="$AUTH_HOST" \
+STORE="$STORE" OTEL="$OTEL" METERING="$METERING" AGENT_HOST="$AGENT_HOST" TENANT="$TENANT" AGENT_AUDIENCE="$AGENT_AUDIENCE" \
+CORE_AUDIENCE="$CORE_AUDIENCE" ID_CONSOLE="$ID_CONSOLE" ID_AGENT="$ID_AGENT" TARGETS="$TARGETS" HOSTS="$HOSTS" MULE_HOST="$MULE_HOST" AUTH_HOST="$AUTH_HOST" \
 ISSUER="$ISSUER" AUDIENCE="$AUDIENCE" ID_ZENGIN="$ID_ZENGIN" ID_BILLING="$ID_BILLING" ID_FX="$ID_FX" ID_OPS="$ID_OPS" \
 awk '
 function rep(s, from, to,    out, i) {
@@ -123,6 +163,7 @@ function rep(s, from, to,    out, i) {
 }
 {
   if ($0 == "__OTEL_PLUGIN__") { if (ENVIRON["OTEL"] != "") print ENVIRON["OTEL"]; next }
+  if ($0 == "__METERING_PLUGIN__") { if (ENVIRON["METERING"] != "") print ENVIRON["METERING"]; next }
   line = $0
   line = rep(line, "__GATEWAY_SECRET__", ENVIRON["GATEWAY_SECRET"])
   line = rep(line, "__TOKEN_PUBLIC_KEY__", ENVIRON["PUBLIC_KEY"])
@@ -140,6 +181,12 @@ function rep(s, from, to,    out, i) {
   line = rep(line, "__CLIENT_ID_BILLING__", ENVIRON["ID_BILLING"])
   line = rep(line, "__CLIENT_ID_FX__", ENVIRON["ID_FX"])
   line = rep(line, "__CLIENT_ID_OPS__", ENVIRON["ID_OPS"])
+  line = rep(line, "__CLIENT_ID_CONSOLE__", ENVIRON["ID_CONSOLE"])
+  line = rep(line, "__CLIENT_ID_AGENT__", ENVIRON["ID_AGENT"])
+  line = rep(line, "__AGENT_HOST__", ENVIRON["AGENT_HOST"])
+  line = rep(line, "__TENANT_ID__", ENVIRON["TENANT"])
+  line = rep(line, "__AGENT_AUDIENCE__", ENVIRON["AGENT_AUDIENCE"])
+  line = rep(line, "__CORE_AUDIENCE__", ENVIRON["CORE_AUDIENCE"])
   print line
 }' /kong/kong.yml.tmpl > "$OUT"
 chmod 600 "$OUT"

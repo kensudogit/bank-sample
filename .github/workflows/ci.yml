@@ -42,7 +42,7 @@ jobs:
         working-directory: frontend
 
   integration-node:
-    name: MuleSoft 互換・トークン発行（Node.js）
+    name: MuleSoft 互換・トークン発行・AI アシスタント（Node.js）
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -53,6 +53,9 @@ jobs:
         working-directory: integration/mule-compat
       - run: node --test
         working-directory: integration/auth-server
+      # AI アシスタント：偽の Messages API で SDK の tool runner を動かす（Claude API は呼ばない）
+      - run: npm ci --no-audit --no-fund && node --test
+        working-directory: integration/agent
 
   kong:
     name: Kong の構成（kong config parse・decK lint）
@@ -60,7 +63,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: 一時的な秘密情報を作る（このジョブの中だけで使う）
-        run: bash integration/scripts/gen-secrets.sh > "$RUNNER_TEMP/ci.env"
+        run: bash integration/scripts/gen-secrets.sh > "$RUNNER_TEMP/ci.env" && bash integration/scripts/gen-agent-secrets.sh >> "$RUNNER_TEMP/ci.env"
       - name: 構成を描画して Kong 自身で検証する
         run: |
           set -a; . "$RUNNER_TEMP/ci.env"; set +a
@@ -71,6 +74,7 @@ jobs:
             docker run --rm -v "$RUNNER_TEMP/kong:/out" -e KONG_RENDER_OUT=/out/kong-$mode.yml \
               -e KONG_GATEWAY_SECRET="$BANK_GATEWAY_SECRET" -e KONG_TOKEN_PUBLIC_KEY="$KONG_TOKEN_PUBLIC_KEY" \
               -e KONG_MTLS_CA_CERT="$MTLS_CA_CERT" -e KONG_MTLS_CLIENT_CERT="$KONG_MTLS_CLIENT_CERT" -e KONG_MTLS_CLIENT_KEY="$KONG_MTLS_CLIENT_KEY" \
+              -e KONG_ALLOWED_TENANT="$AUTH_TENANT_ID" -e KONG_METERING_URL=http://liberty:9080/bank/api/usage-ingest \
               $redis --entrypoint sh bank-kong -c '/kong/render-config.sh --render-only && chmod 644 "$KONG_RENDER_OUT" && kong config parse "$KONG_RENDER_OUT"'
           done
       - name: 安全側の約束を decK で確かめる（JWT・iss/aud/roles・ACL・Redis・mTLS・共有シークレット）
@@ -81,6 +85,7 @@ jobs:
           docker run --rm -e AUTH_MODE=entra -e ENTRA_TENANT_ID=00000000-0000-0000-0000-000000000000 -e KONG_TOKEN_AUDIENCE=api://bank-integration \
             -e KONG_CLIENT_ID_ZENGIN=11111111-1111-1111-1111-111111111111 -e KONG_CLIENT_ID_BILLING=22222222-2222-2222-2222-222222222222 \
             -e KONG_CLIENT_ID_FX=33333333-3333-3333-3333-333333333333 -e KONG_CLIENT_ID_OPS=44444444-4444-4444-4444-444444444444 \
+            -e KONG_CLIENT_ID_CONSOLE=55555555-5555-5555-5555-555555555555 -e KONG_CLIENT_ID_AGENT=66666666-6666-6666-6666-666666666666 \
             -e KONG_GATEWAY_SECRET="$BANK_GATEWAY_SECRET" -e KONG_TOKEN_PUBLIC_KEY="$KONG_TOKEN_PUBLIC_KEY" \
             -e KONG_MTLS_CA_CERT="$MTLS_CA_CERT" -e KONG_MTLS_CLIENT_CERT="$KONG_MTLS_CLIENT_CERT" -e KONG_MTLS_CLIENT_KEY="$KONG_MTLS_CLIENT_KEY" \
             --entrypoint sh bank-kong -c '/kong/render-config.sh --render-only && grep -q "login.microsoftonline.com/00000000-0000-0000-0000-000000000000/v2.0" /tmp/kong.yml && kong config parse /tmp/kong.yml'
@@ -94,7 +99,8 @@ jobs:
       - name: docker compose の構成（監視のプロファイルを含む）
         run: |
           bash integration/scripts/gen-secrets.sh > .env
-          printf 'ORACLE_PASSWORD=x\nBANK_DB_PASSWORD=x\nMULE_CORE_PASSWORD=x\n' >> .env
+          bash integration/scripts/gen-agent-secrets.sh >> .env
+          printf 'ORACLE_PASSWORD=x\nBANK_DB_PASSWORD=x\nMULE_CORE_PASSWORD=x\nANTHROPIC_API_KEY=x\n' >> .env
           docker compose --profile observability config -q
           rm .env
       - name: Prometheus の設定と警告のルール

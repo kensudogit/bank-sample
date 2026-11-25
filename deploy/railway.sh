@@ -55,9 +55,12 @@ secrets() {
   log "redis"
   secret redis REDIS_PASSWORD REDIS_PASSWORD
 
-  log "auth（トークンの署名鍵と、クライアントシークレットのハッシュ）"
+  log "auth（トークンの署名鍵と、クライアントシークレットのハッシュ。画面・AI Agent のクライアントを含む）"
   secret auth AUTH_SIGNING_KEY AUTH_SIGNING_KEY
-  secret auth AUTH_CLIENTS AUTH_CLIENTS
+  need AUTH_CLIENTS_AGENT
+  ALL_CLIENTS="$AUTH_CLIENTS,$AUTH_CLIENTS_AGENT"
+  secret auth AUTH_CLIENTS ALL_CLIENTS
+  secret auth AUTH_TENANT_ID AUTH_TENANT_ID
 
   log "kong（公開鍵・mTLS のクライアント証明書・Liberty と共有するシークレット・Redis）"
   ref    kong KONG_GATEWAY_SECRET '${{liberty.BANK_GATEWAY_SECRET}}'
@@ -66,6 +69,12 @@ secrets() {
   secret kong KONG_MTLS_CLIENT_CERT KONG_MTLS_CLIENT_CERT
   secret kong KONG_MTLS_CLIENT_KEY KONG_MTLS_CLIENT_KEY
   ref    kong KONG_REDIS_PASSWORD '${{redis.REDIS_PASSWORD}}'
+  ref    kong KONG_ALLOWED_TENANT '${{auth.AUTH_TENANT_ID}}'
+
+  log "agent（AI アシスタント：Agent のクライアントシークレット・許可するテナント・Claude API のキー）"
+  secret agent AGENT_CLIENT_SECRET OAUTH_SECRET_AGENT
+  ref    agent AUTH_ALLOWED_TENANTS '${{auth.AUTH_TENANT_ID}}'
+  secret agent ANTHROPIC_API_KEY ANTHROPIC_API_KEY
 
   log "mule（mTLS のサーバー証明書・行員トークンの検証鍵・勘定系のサービスアカウント）"
   secret mule MULE_CORE_PASSWORD MULE_CORE_PASSWORD
@@ -78,6 +87,10 @@ secrets() {
   secret frontend INTEGRATION_CLIENT_SECRET OAUTH_SECRET_OPS
   ref    frontend OPERATOR_TOKEN_SECRET '${{mule.OPERATOR_TOKEN_SECRET}}'
   secret frontend CONSOLE_CSRF_SECRET CONSOLE_CSRF_SECRET
+  secret frontend AGENT_CONSOLE_CLIENT_SECRET OAUTH_SECRET_CONSOLE
+
+  # コスト・課金：Railway の使用量を読むトークン（任意。アカウント／ワークスペースのトークン）
+  if [ -n "${RAILWAY_API_TOKEN:-}" ]; then secret liberty RAILWAY_API_TOKEN RAILWAY_API_TOKEN; fi
 
   echo "done（反映は次のデプロイ。main への push、または Railway の Redeploy）"
 }

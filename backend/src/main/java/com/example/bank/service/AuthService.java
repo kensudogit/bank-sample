@@ -52,6 +52,23 @@ public class AuthService {
     /** @return アプリケーション既定のインスタンス */
     public static AuthService getDefault() { return DEFAULT; }
 
+    /**
+     * AI Agent が行員の委任（On-Behalf-Of のトークン。Kong が署名・発行者・宛先・テナント・スコープを検証済み）で
+     * 勘定系を呼ぶときの利用者。DB 上の行員の現在の状態で判断する（無効化・ロック・初期パスワードのままなら使えない）。
+     *
+     * @param userId トークンの preferred_username
+     * @return 行員。使えない場合は null
+     */
+    public LoginUser delegatedStaff(String userId) {
+        if (userId == null || !userId.matches("^[A-Za-z0-9_.@-]{1,30}$")) return null;
+        return com.example.bank.support.Transactions.readOnly(dataSource.get(), c -> users.findById(c, userId)
+                .filter(u -> u.enabled && !u.mustChangePassword)
+                .filter(u -> u.lockedUntil == null || !u.lockedUntil.isAfter(LocalDateTime.now(clock)))
+                .filter(u -> LoginUser.TELLER.equals(u.role) || LoginUser.SUPERVISOR.equals(u.role))
+                .map(u -> new LoginUser(u.userId, u.displayName, u.role, u.customerId, false))
+                .orElse(null));
+    }
+
     /** ログイン。失敗時は AUTH_FAILED（ロック中は ACCOUNT_LOCKED）。 */
     public LoginUser login(String userId, String password) {
         // PBKDF2 は意図的に遅い（約 0.1 秒以上）。行ロック中に計算すると同じ利用者へのログインが詰まるため、ロックの外で先に照合する

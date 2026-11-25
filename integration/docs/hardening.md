@@ -55,3 +55,21 @@ E2E の主な確認：トークンなし 401・別の連携先のトークン 40
 - Entra ID は設定の切り替え（`AUTH_MODE=entra`）を CI で描画・構文確認しただけで、実テナントでの確認はしていない。OSS の jwt プラグインは鍵の自動更新に追従しない。
 - Kong ↔ Liberty は共有シークレット（mTLS ではない）。監査ログの外部アンカーはアプリケーションログで、WORM ストレージではない。
 - Terraform の state はローカル（Git 管理外）。チームで使うときは `backend.tf` でリモートの保存先を設定する。
+
+## AI Agent・課金（追加：2026-11-25）
+
+認証認可（Entra ID 連携・Agent 経由のアクセス制御・追跡）は [agent-auth-design.md](agent-auth-design.md)、課金の可視化とコスト予測は
+[finops-cost-model.md](finops-cost-model.md)。
+
+| 対象 | 確認 | 結果 |
+|---|---|---|
+| トークン発行（Entra 互換） | `npm test`（OBO・セッションブリッジ・拒否） | 10 件成功 |
+| AI Agent | `npm test`（偽の Messages API で SDK の tool runner を動かす。トークンの拒否・予算・スコープ・提案・費用の上限・strict のスキーマ） | 9 件成功 |
+| 勘定系 | `gradle test`（`FinOpsServiceTest`：配賦・単価・予測・予算・Railway の取込み・委任の利用者） | 成功 |
+| 画面 | `npm test`（AI アシスタント・コスト・課金・サーバー側の委任トークン） | 51 ファイル・378 件成功 |
+| Kong | `kong config parse`・`deck file lint`（Agent の経路は委任トークン・GET のみ、メーターはアプリのロール） | 成功 |
+| E2E（docker compose） | 委任トークン・OBO・宛先違い／アプリのみ／スコープ外の拒否、GET 以外の拒否、偽の識別ヘッダーの無視、顧客の利用拒否、CSRF、Claude の実行（1 回）、予算による停止、使用量・LLM の記録、部門への配賦、監査ログの Agent の記録 | 32 件すべて成功 |
+
+E2E の Claude の実行は 1 回 4.51 円（入力 6・出力 580・キャッシュ読み込み 3,512・書き込み 3,550 トークン）。
+Railway の使用量の取込みは、Railway のアカウント／ワークスペースのトークン（`RAILWAY_API_TOKEN`）を設定するまで「未設定」と表示する
+（取込みの処理は偽の API でテスト済み。CLI のトークンで使用量 API の応答の形を確認済み）。

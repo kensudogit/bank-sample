@@ -1,0 +1,10 @@
+# Railway：AI アシスタント（社内ネットワークのみ。画面からは Kong の /agent/v1/runs で呼ぶ）
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "Dockerfile"
+
+[deploy]
+healthcheckPath = "/live"
+healthcheckTimeout = 60
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 5

@@ -57,14 +57,14 @@ describe("AppShell", () => {
     expect(screen.getByText(`${roleLabel.CUSTOMER} ・ cust01`)).toBeInTheDocument();
   });
 
-  it("窓口担当には顧客・顧客分析が加わる", async () => {
+  it("窓口担当には顧客・AI アシスタント・顧客分析が加わる（コスト・課金は役席だけ）", async () => {
     await renderPage(<Who />, { user: tellerUser });
-    expect(navLinks()).toEqual(["口座一覧", "振込・振替", "為替・口座振替", "預金商品", "融資", "顧客・口座開設", "顧客分析"]);
+    expect(navLinks()).toEqual(["口座一覧", "振込・振替", "為替・口座振替", "預金商品", "融資", "顧客・口座開設", "AI アシスタント", "顧客分析"]);
   });
 
   it("役席には経営・帳票・管理メニューが加わり、現在の画面を強調する", async () => {
     await renderPage(<Who />, { user: supervisorUser, path: "/accounts/1000001" });
-    expect(navLinks()).toEqual(expect.arrayContaining(["経営ダッシュボード", "帳票", "リスク管理", "AML", "業務処理", "銀行バッチ", "監査ログ"]));
+    expect(navLinks()).toEqual(expect.arrayContaining(["経営ダッシュボード", "帳票", "リスク管理", "AML", "業務処理", "銀行バッチ", "コスト・課金", "AI アシスタント", "監査ログ"]));
     expect(screen.getByRole("link", { name: "口座一覧" })).toHaveAttribute("aria-current", "page");
     expect(screen.getByRole("link", { name: "融資" })).not.toHaveAttribute("aria-current");
   });

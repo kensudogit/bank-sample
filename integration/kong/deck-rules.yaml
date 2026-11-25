@@ -82,3 +82,36 @@ rules:
             properties:
               name: { const: request-transformer }
               config: { type: object, required: [remove, add] }
+
+  agent-core-requires-delegated-token:
+    description: Agent から勘定系への経路は、行員の委任トークン（On-Behalf-Of）だけを受け付け、検証済みの識別ヘッダーを付ける
+    given: $.services[?(@.name == 'agent-core-api')].plugins[?(@.name == 'bank-token-claims')].config
+    severity: error
+    then:
+      - field: token_type
+        function: pattern
+        functionOptions: { match: "^delegated$" }
+      - field: forward_identity
+        function: truthy
+      - field: allowed_tenants
+        function: truthy
+
+  agent-core-read-only:
+    description: Agent から勘定系への経路は参照（GET）だけ
+    given: $.services[?(@.name == 'agent-core-api')].routes[*].methods
+    severity: error
+    then:
+      function: schema
+      functionOptions:
+        schema: { type: array, items: { const: GET } }
+
+  agent-meter-requires-app-role:
+    description: Agent のメーターは、アプリのみのトークンとロール Agent.Meter が必要
+    given: $.services[?(@.name == 'agent-meter-usage' || @.name == 'agent-meter-budget')].plugins[?(@.name == 'bank-token-claims')].config
+    severity: error
+    then:
+      - field: token_type
+        function: pattern
+        functionOptions: { match: "^app$" }
+      - field: required_roles
+        function: truthy

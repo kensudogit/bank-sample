@@ -4,6 +4,7 @@ import com.example.bank.action.BaseApiAction;
 import com.example.bank.domain.ErrorCode;
 import com.example.bank.domain.LoginUser;
 import com.example.bank.service.AuditService;
+import com.example.bank.service.AuthService;
 import com.example.bank.service.IdempotencyService;
 import com.opensymphony.xwork2.ActionInvocation;
 import com.opensymphony.xwork2.interceptor.AbstractInterceptor;
@@ -30,7 +31,11 @@ import java.util.stream.Collectors;
  *   <li>初期パスワードのままの利用者は、パスワード変更などの許可された API 以外は 403</li>
  *   <li>監査ログ: 更新系と audit=true の API、および権限エラーを記録する</li>
  *   <li>セキュリティ系レスポンスヘッダーを付与</li>
+ *   <li>AI Agent からの要求（Kong が検証した On-Behalf-Of のトークン。X-Bank-Auth: delegated-token）は、
+ *       行員の現在の権限（ロール）と Agent のスコープ（agentScope）の両方を満たすときだけ通す（参照のみ・既定は拒否）。
+ *       Agent のメーター（アプリのみのトークン・ロール Agent.Meter）は AGENT ロールとして扱う。いずれも監査ログに Agent とトークン ID を残す</li>
  * </ul>
+ * X-Bank-* の識別ヘッダーは、ゲートウェイ（GatewayGuardFilter が共有シークレットで確認）が送信元の値を消してから付けたものだけが届く。
  */
 public class ApiGuardInterceptor extends AbstractInterceptor {
     /** ログイン中の利用者（{@link LoginUser}）を保存する HTTP セッション属性名 */
@@ -43,6 +48,10 @@ public class ApiGuardInterceptor extends AbstractInterceptor {
     private Set<String> roles = Collections.singleton(AUTHENTICATED);
     private boolean audit;
     private boolean allowDuringPasswordChange;
+    private String agentScope;
+
+    /** Agent（委任トークン）が使える API とするときの必要スコープ（例 Accounts.Read）。未設定なら Agent からは使えない */
+    public void setAgentScope(String scope) { this.agentScope = scope == null || scope.trim().isEmpty() ? null : scope.trim(); }
 
     /** @param methods 許可する HTTP メソッド（カンマ区切り） */
     public void setAllowedMethods(String methods) { this.allowedMethods = csv(methods); }
@@ -86,7 +95,30 @@ public class ApiGuardInterceptor extends AbstractInterceptor {
             if (!json || !ajax) return reject(action, ErrorCode.FORBIDDEN);
         }
 
-        LoginUser user = sessionUser(request);
+        // AI Agent からの要求：セッションではなく、Kong が検証したトークンのクレームで利用者を決める
+        String auth = request.getHeader("X-Bank-Auth");
+        String agentContext = null;
+        LoginUser user;
+        if ("delegated-token".equals(auth)) {
+            String agentId = request.getHeader("X-Bank-Agent-Id");
+            agentContext = "agent=" + agentId + " token=" + request.getHeader("X-Bank-Token-Id");
+            Set<String> scopes = new HashSet<>(Arrays.asList(String.valueOf(request.getHeader("X-Bank-Scopes")).split(" ")));
+            user = AuthService.getDefault().delegatedStaff(request.getHeader("X-Bank-Delegated-User"));
+            // 参照の API で、その API のスコープを Agent が持っているときだけ（設定のない API は Agent から使えない＝既定は拒否）
+            if (user == null || agentScope == null || !"GET".equals(method) || !scopes.contains(agentScope)) {
+                AuditService.getDefault().record(user, request.getHeader("X-Bank-Delegated-User"), actionName, null,
+                        AuditService.DENIED, "AGENT_SCOPE " + agentContext + " scope=" + agentScope, clientIp(request));
+                return reject(action, user == null ? ErrorCode.UNAUTHENTICATED : ErrorCode.FORBIDDEN);
+            }
+        } else if ("app-token".equals(auth)) {
+            String agentId = request.getHeader("X-Bank-Agent-Id");
+            agentContext = "agent=" + agentId + " token=" + request.getHeader("X-Bank-Token-Id");
+            Set<String> appRoles = new HashSet<>(Arrays.asList(String.valueOf(request.getHeader("X-Bank-Roles")).split(" ")));
+            user = agentId != null && agentId.matches("^[A-Za-z0-9_.-]{1,40}$") && appRoles.contains("Agent.Meter")
+                    ? new LoginUser("agent:" + agentId, "AI Agent " + agentId, LoginUser.AGENT, null, false) : null;
+        } else {
+            user = sessionUser(request);
+        }
         if (!roles.contains(PUBLIC)) {
             if (user == null) return reject(action, ErrorCode.UNAUTHENTICATED);
             // 初期パスワードのまま業務 API を使わせない（発行時のパスワードを知る人が本人になりすますのを防ぐ）
@@ -95,7 +127,8 @@ public class ApiGuardInterceptor extends AbstractInterceptor {
             }
             // 外部連携のサービスアカウントは、ロールを明示的に列挙した API だけ（AUTHENTICATED の API も不可）
             boolean listed = roles.contains(user.getRole());
-            boolean allowed = LoginUser.INTEGRATION.equals(user.getRole()) ? listed : (roles.contains(AUTHENTICATED) || listed);
+            boolean service = LoginUser.INTEGRATION.equals(user.getRole()) || LoginUser.AGENT.equals(user.getRole());
+            boolean allowed = service ? listed : (roles.contains(AUTHENTICATED) || listed);
             if (!allowed) {
                 // 権限外の操作の試みは不正の兆候になり得るため、GET でも DENIED として記録する
                 AuditService.getDefault().record(user, null, actionName, null, AuditService.DENIED,
@@ -142,13 +175,14 @@ public class ApiGuardInterceptor extends AbstractInterceptor {
         String finalCode = invocation.getResultCode() != null ? invocation.getResultCode() : result;
 
         // 更新系はすべて記録する。結果（成功・失敗）にかかわらず記録し、誰が何をしようとしたかを残す
-        if (audit || !"GET".equals(method)) {
-            LoginUser after = sessionUser(request);   // login sets it, logout clears it
+        if (audit || !"GET".equals(method) || agentContext != null) {
+            LoginUser after = agentContext != null ? null : sessionUser(request);   // login sets it, logout clears it
             LoginUser who = after != null ? after : user;
+            final String via = agentContext;
             AuditService.getDefault().record(who, api == null ? null : api.getAuditUserHint(), actionName,
                     api == null ? null : api.getAuditTarget(),
                     "success".equals(finalCode) ? AuditService.SUCCESS : AuditService.FAILURE,
-                    replayed[0] != null ? replayed[0] : api == null ? null : api.getAuditDetail(), clientIp(request),
+                    withAgent(replayed[0] != null ? replayed[0] : api == null ? null : api.getAuditDetail(), via), clientIp(request),
                     api == null ? null : api.getRequestKey());
         }
         return finalCode;
@@ -196,6 +230,12 @@ public class ApiGuardInterceptor extends AbstractInterceptor {
         } catch (org.apache.struts2.json.JSONException e) {
             throw new IllegalStateException(e);
         }
+    }
+
+    // 監査ログの詳細に、Agent 経由であること（Agent のクライアント ID とトークン ID）を加える
+    private static String withAgent(String detail, String agentContext) {
+        if (agentContext == null) return detail;
+        return detail == null ? agentContext : detail + " " + agentContext;
     }
 
     // Action を実行せずにエラー応答を返す（BaseApiAction 以外では結果名だけを返す）

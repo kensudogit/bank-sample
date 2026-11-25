@@ -33,6 +33,7 @@ const jobLabel: Record<string, string> = {
   REQUEST_CLEANUP: "冪等キー整理",
   AUDIT_ANCHOR: "監査ログのアンカー",
   AUDIT_RETENTION: "監査ログの保存期間",
+  INFRA_COST_SYNC: "インフラ費用の取込み",
   DW_LOAD: "情報系取込",
   TIME_MATURITY: "定期満期",
   LOAN_DUE: "融資返済・延滞",

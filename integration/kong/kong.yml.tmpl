@@ -4,6 +4,8 @@
 #   ブラウザ → frontend →（Host: kong）kong:8000 /bank/api/* → liberty（共有シークレットを付け直して転送）
 #   連携先 → kong /oauth2/token（クライアントクレデンシャル）→ auth（トークン発行）
 #   連携先 → kong /integration/v1/*（Bearer トークン：署名・iss・aud・exp・roles）→ mule:8443（mTLS）→ kong → liberty
+#   画面 → kong /agent/v1/runs（行員の委任トークン）→ agent（Claude）→ kong /agent/v1/bank/*（On-Behalf-Of のトークン）→ liberty
+#   全要求の記録（http-log）→ liberty /bank/api/usage-ingest（課金の配賦・コスト予測）
 #
 # - レート制限は Redis で Kong の全台が共有する（policy: redis。Redis が止まっても通信は止めない＝fault_tolerant）
 # - AUTH_MODE=entra なら、発行者・宛先・公開鍵・クライアント ID を Microsoft Entra ID の値にする（render-config.sh）
@@ -48,11 +50,20 @@ services:
     retries: 2
     plugins:
       # ゲートウェイ迂回の防止：送信元が付けた同名ヘッダーを消してから、Liberty と共有するシークレットを付ける
+      # 送信元が付けた識別ヘッダー（X-Bank-Auth など。Agent のルートでだけ Kong が検証済みのトークンから付ける）も消す
       - name: request-transformer
         config:
-          remove: { headers: ["X-Bank-Gateway-Secret"] }
+          remove: { headers: ["X-Bank-Gateway-Secret", "X-Bank-Auth", "X-Bank-Delegated-User", "X-Bank-Delegated-Oid", "X-Bank-Agent-Id", "X-Bank-Scopes", "X-Bank-Roles", "X-Bank-Token-Id", "X-Bank-Tenant"] }
           add: { headers: ["X-Bank-Gateway-Secret:__GATEWAY_SECRET__"] }
     routes:
+      # Kong だけが使う勘定系の内部 API（使用量の記録・Agent のメーター）は、画面の経路からは呼べない
+      - name: bank-core-internal-only
+        hosts: __INTERNAL_HOSTS__
+        paths: ["/bank/api/usage-ingest", "/bank/api/agent-usage", "/bank/api/agent-budget"]
+        strip_path: false
+        plugins:
+          - name: request-termination
+            config: { status_code: 404, message: "Not Found" }
       # ログインは IP ごとに厳しく制限する（Liberty 側の 5 回失敗ロックに加えた総当たり対策）
       - name: bank-core-login
         hosts: __INTERNAL_HOSTS__
@@ -171,6 +182,93 @@ services:
       - name: request-transformer
         config: { remove: { headers: ["X-Bank-Operator"] } }
 
+  # ---------------- AI Agent（Claude）。行員の委任 → On-Behalf-Of → 勘定系の参照 API ----------------
+  # 画面のサーバー側 → Agent：行員の委任トークン（aud=api://bank-agent・scp=Agent.Invoke）。行員ごとに 1 分 10 回
+  - name: agent-runs
+    url: http://__AGENT_HOST__:8090/v1/runs
+    read_timeout: 180000
+    routes:
+      - name: agent-runs
+        paths: ["/agent/v1/runs"]
+        strip_path: true
+        methods: ["POST"]
+    plugins:
+      - name: jwt
+        config: *jwt_conf
+      - name: bank-token-claims
+        config: { issuer: "__TOKEN_ISSUER__", audiences: ["__AGENT_AUDIENCE__"], token_type: delegated, required_scopes: ["Agent.Invoke"], allowed_tenants: ["__TENANT_ID__"], forward_identity: true }
+      - name: acl
+        config: { allow: ["console"], hide_groups_header: true }
+      - name: rate-limiting
+        config: { minute: 10, limit_by: header, header_name: X-Bank-Delegated-Oid, __RATE_LIMIT_STORE__ }
+      - name: request-size-limiting
+        config: { allowed_payload_size: 16, size_unit: kilobytes }
+
+  # Agent → 勘定系の参照 API：On-Behalf-Of のトークン（aud=api://bank-core・azp=Agent・行員の oid・委任スコープ）。
+  # Kong が検証済みのクレームを X-Bank-* にして Liberty に渡し、Liberty は「行員の権限 ∩ Agent のスコープ」で判定する。参照（GET）だけ
+  - name: agent-core-api
+    host: liberty.upstream
+    port: 9080
+    protocol: http
+    path: /bank/api
+    connect_timeout: 1000
+    read_timeout: 30000
+    routes:
+      - name: agent-core-api
+        paths: ["/agent/v1/bank"]
+        strip_path: true
+        methods: ["GET"]
+    plugins:
+      - name: jwt
+        config: *jwt_conf
+      - name: bank-token-claims
+        config: { issuer: "__TOKEN_ISSUER__", audiences: ["__CORE_AUDIENCE__"], token_type: delegated, required_scopes: ["Accounts.Read", "Transactions.Read", "Customers.Read", "Fx.Read"], allowed_tenants: ["__TENANT_ID__"], forward_identity: true }
+      - name: acl
+        config: { allow: ["agents"], hide_groups_header: true }
+      - name: rate-limiting
+        config: { minute: 120, limit_by: consumer, __RATE_LIMIT_STORE__ }
+      - name: request-transformer
+        config:
+          remove: { headers: ["X-Bank-Gateway-Secret"] }
+          add: { headers: ["X-Bank-Gateway-Secret:__GATEWAY_SECRET__"] }
+
+  # Agent のメーター（アプリのみのトークン・ロール Agent.Meter）：実行と LLM のトークン数の記録、予算の確認
+  - name: agent-meter-usage
+    host: liberty.upstream
+    port: 9080
+    protocol: http
+    path: /bank/api/agent-usage
+    routes:
+      - name: agent-meter-usage
+        paths: ["/agent/v1/meter/usage"]
+        strip_path: true
+        methods: ["POST"]
+    plugins: &agent_meter_plugins
+      - name: jwt
+        config: *jwt_conf
+      - name: bank-token-claims
+        config: { issuer: "__TOKEN_ISSUER__", audiences: ["__TOKEN_AUDIENCE__"], token_type: app, required_roles: ["Agent.Meter"], allowed_tenants: ["__TENANT_ID__"], forward_identity: true }
+      - name: acl
+        config: { allow: ["agents"], hide_groups_header: true }
+      - name: request-transformer
+        config:
+          remove: { headers: ["X-Bank-Gateway-Secret"] }
+          add: { headers: ["X-Bank-Gateway-Secret:__GATEWAY_SECRET__"] }
+
+  - name: agent-meter-budget
+    host: liberty.upstream
+    port: 9080
+    protocol: http
+    path: /bank/api/agent-budget
+    routes:
+      - name: agent-meter-budget
+        paths: ["/agent/v1/meter/budget"]
+        strip_path: true
+        methods: ["GET"]
+    plugins: *agent_meter_plugins
+
+  # ゲートウェイ自体の死活
+
   # ゲートウェイ自体の死活（Railway などのヘルスチェック用。上流へは転送しない）
   - name: gateway-health
     url: http://127.0.0.1:65535
@@ -226,6 +324,7 @@ plugins:
   - name: prometheus
     config: { status_code_metrics: true, latency_metrics: true, upstream_health_metrics: true, per_consumer: true, bandwidth_metrics: true }
 __OTEL_PLUGIN__
+__METERING_PLUGIN__
 
 # 連携先（API の利用者）。キーはトークンの azp（クライアント ID）。グループ（ACL）で呼べる API を限定する
 consumers:
@@ -246,3 +345,13 @@ consumers:
     custom_id: internal-ops
     jwt_secrets: [{ key: "__CLIENT_ID_OPS__", algorithm: RS256, rsa_public_key: "__TOKEN_PUBLIC_KEY__" }]
     acls: [{ group: bank-ops }]
+  # 画面（行員の委任トークンで Agent を呼ぶ）
+  - username: bank-console
+    custom_id: internal-console
+    jwt_secrets: [{ key: "__CLIENT_ID_CONSOLE__", algorithm: RS256, rsa_public_key: "__TOKEN_PUBLIC_KEY__" }]
+    acls: [{ group: console }]
+  # AI Agent（On-Behalf-Of のトークンで勘定系を参照、アプリのみのトークンでメーター）
+  - username: bank-agent
+    custom_id: agent-bank-assistant
+    jwt_secrets: [{ key: "__CLIENT_ID_AGENT__", algorithm: RS256, rsa_public_key: "__TOKEN_PUBLIC_KEY__" }]
+    acls: [{ group: agents }]

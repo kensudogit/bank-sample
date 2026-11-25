@@ -47,7 +47,8 @@ export function createCoreClient({
     const send = () => call(path, {
       method,
       headers: {
-        Accept: "application/json", Cookie: cookie, "X-Request-ID": requestId ?? "", ...(traceparent ? { traceparent } : {}),
+        // X-Bank-Caller：Kong の使用量の記録で、MuleSoft からの勘定系の呼び出しとして配賦する（認可には使わない）
+        Accept: "application/json", Cookie: cookie, "X-Request-ID": requestId ?? "", "X-Bank-Caller": "mule", ...(traceparent ? { traceparent } : {}),
         ...(method === "POST" ? { "Content-Type": "application/json", "X-Requested-With": "XMLHttpRequest" } : {}),
       },
       body: method === "POST" ? JSON.stringify(body) : undefined,
