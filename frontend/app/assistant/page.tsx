@@ -9,6 +9,7 @@ import Link from "next/link";
 import { useState } from "react";
 import { RequireRole } from "@/components/AuthProvider";
 import { ErrorBox } from "@/components/Feedback";
+import { Markdown } from "@/components/Markdown";
 import { agentApi, type AgentRunResult } from "@/lib/agent";
 import { formatNumber, formatYen } from "@/lib/format";
 
@@ -86,7 +87,7 @@ export default function AssistantPage() {
               <h2 style={{ margin: 0 }}>回答</h2>
               <span className={`badge ${statusLabel[result.status]?.[1] ?? ""}`}>{statusLabel[result.status]?.[0] ?? result.status}</span>
             </div>
-            <p style={{ whiteSpace: "pre-wrap" }}>{result.answer || "（回答なし）"}</p>
+            {result.answer ? <Markdown text={result.answer} /> : <p className="muted">（回答なし）</p>}
             {result.proposals.length > 0 && (
               <div className="section-note">
                 <strong>提案（未実行）</strong>
