@@ -154,6 +154,8 @@ a:hover { text-decoration: underline; }
 
 .sidebar {
   position: sticky; top: 0; height: 100vh; display: flex; flex-direction: column; gap: 8px;
+  /* メインとは別にスクロールする（メニューが画面より長いとき）。端まで来てもメインに伝えない */
+  overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable;
   padding: 20px 14px; border-right: 1px solid var(--border);
   background: var(--sidebar); backdrop-filter: saturate(160%) blur(14px);
 }
