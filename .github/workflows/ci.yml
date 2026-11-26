@@ -71,7 +71,7 @@ jobs:
           mkdir -p "$RUNNER_TEMP/kong" && chmod 777 "$RUNNER_TEMP/kong"
           for mode in redis local; do
             redis=""; [ "$mode" = redis ] && redis="-e KONG_REDIS_HOST=redis -e KONG_REDIS_PASSWORD=$REDIS_PASSWORD"
-            docker run --rm -v "$RUNNER_TEMP/kong:/out" -e KONG_RENDER_OUT=/out/kong-$mode.yml \
+            docker run --rm -v "$RUNNER_TEMP/kong:/out" -e KONG_DATABASE=off -e KONG_RENDER_OUT=/out/kong-$mode.yml \
               -e KONG_GATEWAY_SECRET="$BANK_GATEWAY_SECRET" -e KONG_TOKEN_PUBLIC_KEY="$KONG_TOKEN_PUBLIC_KEY" \
               -e KONG_MTLS_CA_CERT="$MTLS_CA_CERT" -e KONG_MTLS_CLIENT_CERT="$KONG_MTLS_CLIENT_CERT" -e KONG_MTLS_CLIENT_KEY="$KONG_MTLS_CLIENT_KEY" \
               -e KONG_ALLOWED_TENANT="$AUTH_TENANT_ID" -e KONG_METERING_URL=http://liberty:9080/bank/api/usage-ingest \
@@ -82,7 +82,7 @@ jobs:
       - name: Entra ID の設定でも描画できる
         run: |
           set -a; . "$RUNNER_TEMP/ci.env"; set +a
-          docker run --rm -e AUTH_MODE=entra -e ENTRA_TENANT_ID=00000000-0000-0000-0000-000000000000 -e KONG_TOKEN_AUDIENCE=api://bank-integration \
+          docker run --rm -e KONG_DATABASE=off -e AUTH_MODE=entra -e ENTRA_TENANT_ID=00000000-0000-0000-0000-000000000000 -e KONG_TOKEN_AUDIENCE=api://bank-integration \
             -e KONG_CLIENT_ID_ZENGIN=11111111-1111-1111-1111-111111111111 -e KONG_CLIENT_ID_BILLING=22222222-2222-2222-2222-222222222222 \
             -e KONG_CLIENT_ID_FX=33333333-3333-3333-3333-333333333333 -e KONG_CLIENT_ID_OPS=44444444-4444-4444-4444-444444444444 \
             -e KONG_CLIENT_ID_CONSOLE=55555555-5555-5555-5555-555555555555 -e KONG_CLIENT_ID_AGENT=66666666-6666-6666-6666-666666666666 \
