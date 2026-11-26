@@ -16,14 +16,14 @@
 
   <flow name="zengin-incoming-flow" doc:name="POST /api/v1/zengin/incoming">
     <http:listener config-ref="Integration_Listener" path="/api/v1/zengin/incoming" allowedMethods="POST" doc:name="受信">
-      <http:error-response statusCode="#[vars.problemStatus default 500]">
-        <http:body><![CDATA[#[payload]]]></http:body>
-        <http:headers><![CDATA[#[{ "Content-Type": "application/problem+json", "X-Request-ID": vars.requestId default "" }]]]></http:headers>
-      </http:error-response>
       <!-- 再送の再現では保存したステータス（200・422）を返す -->
       <http:response statusCode="#[vars.httpStatus default 200]">
         <http:headers><![CDATA[#[{ "X-Request-ID": vars.requestId default "", "Idempotent-Replayed": if (vars.replayed default false) "true" else "false" }]]]></http:headers>
       </http:response>
+      <http:error-response statusCode="#[vars.problemStatus default 500]">
+        <http:body><![CDATA[#[payload]]]></http:body>
+        <http:headers><![CDATA[#[{ "Content-Type": "application/problem+json", "X-Request-ID": vars.requestId default "" }]]]></http:headers>
+      </http:error-response>
     </http:listener>
     <set-variable variableName="runKind" value="ZENGIN_INCOMING"/>
     <flow-ref name="begin-run" doc:name="実行を登録（冪等キー・行員トークン）"/>
