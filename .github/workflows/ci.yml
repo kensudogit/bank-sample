@@ -75,7 +75,7 @@ jobs:
               -e KONG_GATEWAY_SECRET="$BANK_GATEWAY_SECRET" -e KONG_TOKEN_PUBLIC_KEY="$KONG_TOKEN_PUBLIC_KEY" \
               -e KONG_MTLS_CA_CERT="$MTLS_CA_CERT" -e KONG_MTLS_CLIENT_CERT="$KONG_MTLS_CLIENT_CERT" -e KONG_MTLS_CLIENT_KEY="$KONG_MTLS_CLIENT_KEY" \
               -e KONG_ALLOWED_TENANT="$AUTH_TENANT_ID" -e KONG_METERING_URL=http://liberty:9080/bank/api/usage-ingest \
-              $redis --entrypoint sh bank-kong -c '/kong/render-config.sh --render-only && chmod 644 "$KONG_RENDER_OUT" && kong config parse "$KONG_RENDER_OUT"'
+              $redis --entrypoint sh bank-kong -c 'sh /kong/render-config.sh --render-only && chmod 644 "$KONG_RENDER_OUT" && kong config parse "$KONG_RENDER_OUT"'
           done
       - name: 安全側の約束を decK で確かめる（JWT・iss/aud/roles・ACL・Redis・mTLS・共有シークレット）
         run: docker run --rm -v "$RUNNER_TEMP/kong:/out" -v "$PWD/integration/kong:/rules" kong/deck:v1.43.1 file lint -s /out/kong-redis.yml /rules/deck-rules.yaml
@@ -88,7 +88,7 @@ jobs:
             -e KONG_CLIENT_ID_CONSOLE=55555555-5555-5555-5555-555555555555 -e KONG_CLIENT_ID_AGENT=66666666-6666-6666-6666-666666666666 \
             -e KONG_GATEWAY_SECRET="$BANK_GATEWAY_SECRET" -e KONG_TOKEN_PUBLIC_KEY="$KONG_TOKEN_PUBLIC_KEY" \
             -e KONG_MTLS_CA_CERT="$MTLS_CA_CERT" -e KONG_MTLS_CLIENT_CERT="$KONG_MTLS_CLIENT_CERT" -e KONG_MTLS_CLIENT_KEY="$KONG_MTLS_CLIENT_KEY" \
-            --entrypoint sh bank-kong -c '/kong/render-config.sh --render-only && grep -q "login.microsoftonline.com/00000000-0000-0000-0000-000000000000/v2.0" /tmp/kong.yml && kong config parse /tmp/kong.yml'
+            --entrypoint sh bank-kong -c 'sh /kong/render-config.sh --render-only && grep -q "login.microsoftonline.com/00000000-0000-0000-0000-000000000000/v2.0" /tmp/kong.yml && kong config parse /tmp/kong.yml'
 
   specs:
     name: API 仕様・compose・監視の設定
