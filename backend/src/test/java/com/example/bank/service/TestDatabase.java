@@ -21,7 +21,7 @@ import java.util.logging.Logger;
  * H2 (Oracle compatibility mode) in-memory database initialised with the same scripts as the Oracle container
  * (db/init/*.sql), minus Oracle-only session statements.
  */
-final class TestDatabase implements DataSource {
+public final class TestDatabase implements DataSource {
     private final String url;
 
     /** @param url H2 の接続 URL */
@@ -33,7 +33,7 @@ final class TestDatabase implements DataSource {
      * @return 初期化済みの DB
      * @throws IllegalStateException スクリプトが読めない・実行に失敗した場合
      */
-    static TestDatabase create() {
+    public static TestDatabase create() {
         String url = "jdbc:h2:mem:bank-" + UUID.randomUUID()
                 // DB_CLOSE_DELAY=-1: 最後の接続を閉じても DB を消さない。LOCK_TIMEOUT: 同時実行テストで行ロックを最大 10 秒待つ
                 + ";MODE=Oracle;DB_CLOSE_DELAY=-1;LOCK_TIMEOUT=10000";
