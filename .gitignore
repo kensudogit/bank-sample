@@ -20,3 +20,6 @@ backend/bin/
 *.tfplan
 
 integration/agent/node_modules/
+
+# テストダッシュボードの実行履歴（devtools/test-dashboard）
+devtools/test-dashboard/.runs/

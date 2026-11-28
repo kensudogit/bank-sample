@@ -463,6 +463,22 @@ cd backend && ./gradlew war copyJdbcDriver
 cd frontend && npm install && npm test
 ```
 
+### テストダッシュボード（画面からテストを実行・結果を確認）
+
+Java（勘定系：Gradle + JUnit 5）と JavaScript（画面：Vitest、MuleSoft 互換・トークン発行・AI アシスタント：`node --test`）の
+テストを、ブラウザーから選んで実行し、結果を一覧で確認できます（依存パッケージなし、Node.js 22 以上）。
+
+```bash
+node devtools/test-dashboard/server.mjs   # → http://127.0.0.1:4100
+```
+
+- 一式を選んで実行（「すべて実行」「前回失敗したもの」も可）。実行中はログが流れ、中止もできます
+- 結果は JUnit XML から読み、クラス・ファイルごとに成功／失敗／スキップと所要時間を表示。失敗はメッセージとスタックトレースを展開して確認
+- 失敗・スキップでの絞り込み、テスト名での検索。実行の履歴（直近 30 回）は `devtools/test-dashboard/.runs/` に残ります
+
+開発用のツールのため 127.0.0.1 だけで待ち受け、実行できるのは決まったテストのコマンドだけです（本番には載せません）。
+JUnit XML の読み取りのテストは `cd devtools/test-dashboard && node --test`。
+
 フロントエンドを開発モードで起動（Liberty は compose で起動済みであること）:
 
 ```bash

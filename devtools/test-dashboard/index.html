@@ -1,0 +1,387 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>テストダッシュボード · bank-sample</title>
+<style>
+  :root {
+    --bg: #f5f6f8; --panel: #fff; --line: #e2e5ea; --text: #1f2430; --muted: #6b7280;
+    --pass: #15803d; --pass-bg: #e8f5ec; --fail: #b91c1c; --fail-bg: #fdecec;
+    --skip: #a16207; --skip-bg: #fdf6e3; --run: #1d4ed8; --run-bg: #e8effd; --accent: #1e3a8a;
+    --mono: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body { font: 14px/1.5 system-ui, "Segoe UI", "Hiragino Sans", "Yu Gothic UI", sans-serif; color: var(--text); background: var(--bg);
+         display: grid; grid-template-rows: auto 1fr; }
+  header { display: flex; align-items: center; gap: 12px; padding: 10px 20px; background: var(--accent); color: #fff; }
+  header h1 { font-size: 16px; margin: 0; font-weight: 600; }
+  header .sub { opacity: .75; font-size: 12px; }
+  header .spacer { flex: 1; }
+  button { font: inherit; border: 1px solid var(--line); background: #fff; color: var(--text); border-radius: 6px; padding: 6px 12px; cursor: pointer; }
+  button:hover:not(:disabled) { background: #f0f2f5; }
+  button:disabled { opacity: .5; cursor: default; }
+  button.primary { background: #fff; color: var(--accent); border-color: #fff; font-weight: 600; }
+  button.ghost { background: transparent; color: #fff; border-color: rgba(255,255,255,.5); }
+  button.ghost:hover:not(:disabled) { background: rgba(255,255,255,.12); }
+  .layout { display: grid; grid-template-columns: 320px 1fr; min-height: 0; }
+  aside { border-right: 1px solid var(--line); background: var(--panel); overflow-y: auto; padding: 14px; }
+  main { overflow-y: auto; padding: 18px 22px; min-width: 0; }
+  h2 { font-size: 12px; font-weight: 600; color: var(--muted); letter-spacing: .04em; margin: 4px 0 8px; }
+  .suite { display: grid; grid-template-columns: auto 1fr auto; gap: 2px 10px; align-items: center; padding: 10px; border: 1px solid var(--line);
+           border-radius: 8px; margin-bottom: 8px; cursor: pointer; }
+  .suite:hover { border-color: #c7ccd4; }
+  .suite.sel { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset; }
+  .suite input { grid-row: span 2; margin: 0; }
+  .suite .name { font-weight: 600; }
+  .suite .meta { grid-column: 2 / 4; color: var(--muted); font-size: 12px; }
+  .suite .counts { grid-column: 2 / 4; font-size: 12px; }
+  .badge { font-size: 11px; padding: 1px 8px; border-radius: 99px; font-weight: 600; white-space: nowrap; }
+  .b-passed { color: var(--pass); background: var(--pass-bg); }
+  .b-failed, .b-error { color: var(--fail); background: var(--fail-bg); }
+  .b-skipped, .b-cancelled { color: var(--skip); background: var(--skip-bg); }
+  .b-running { color: var(--run); background: var(--run-bg); }
+  .b-queued, .b-none { color: var(--muted); background: #eef0f3; }
+  .pass { color: var(--pass); } .fail { color: var(--fail); } .skip { color: var(--skip); } .muted { color: var(--muted); }
+  .sel-actions { display: flex; gap: 6px; margin: 4px 0 16px; font-size: 12px; }
+  .sel-actions button { padding: 3px 8px; font-size: 12px; }
+  .history { list-style: none; margin: 0; padding: 0; }
+  .history li { display: flex; gap: 8px; align-items: center; padding: 6px 8px; border-radius: 6px; cursor: pointer; font-size: 12px; }
+  .history li:hover { background: #f0f2f5; }
+  .history li.sel { background: var(--run-bg); }
+  .history .when { flex: 1; font-family: var(--mono); }
+  .summary { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 14px; }
+  .tile { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px 14px; min-width: 110px; }
+  .tile .v { font-size: 22px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .tile .k { font-size: 12px; color: var(--muted); }
+  .runhead { display: flex; align-items: baseline; gap: 10px; margin-bottom: 12px; flex-wrap: wrap; }
+  .runhead h3 { margin: 0; font-size: 18px; }
+  .tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--line); margin-bottom: 12px; flex-wrap: wrap; }
+  .tab { border: none; border-bottom: 2px solid transparent; border-radius: 0; background: none; padding: 8px 12px; display: flex; gap: 6px; align-items: center; }
+  .tab.sel { border-bottom-color: var(--accent); font-weight: 600; }
+  .toolbar { display: flex; gap: 8px; align-items: center; margin-bottom: 10px; flex-wrap: wrap; }
+  .toolbar input[type=search] { flex: 1; min-width: 200px; padding: 6px 10px; border: 1px solid var(--line); border-radius: 6px; font: inherit; }
+  .seg { display: inline-flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+  .seg button { border: none; border-radius: 0; border-right: 1px solid var(--line); }
+  .seg button:last-child { border-right: none; }
+  .seg button.sel { background: var(--accent); color: #fff; }
+  .group { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; margin-bottom: 8px; overflow: hidden; }
+  .group > summary { display: flex; gap: 10px; align-items: center; padding: 8px 12px; cursor: pointer; list-style: none; }
+  .group > summary::-webkit-details-marker { display: none; }
+  .group > summary::before { content: "▸"; color: var(--muted); width: 10px; }
+  .group[open] > summary::before { content: "▾"; }
+  .group .gname { flex: 1; font-family: var(--mono); font-size: 13px; word-break: break-all; }
+  .case { display: grid; grid-template-columns: 18px 1fr auto; gap: 8px; padding: 5px 12px 5px 32px; border-top: 1px solid #f0f1f4; align-items: start; }
+  .case .t { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+  .case .msg { grid-column: 2 / 4; }
+  pre { font-family: var(--mono); font-size: 12px; white-space: pre-wrap; word-break: break-word; margin: 4px 0; padding: 8px 10px; border-radius: 6px; }
+  .case pre { background: var(--fail-bg); color: #7f1d1d; max-height: 320px; overflow: auto; }
+  .log { background: #0f172a; color: #e2e8f0; min-height: 200px; max-height: calc(100vh - 290px); overflow: auto; margin: 0; }
+  .empty { color: var(--muted); padding: 40px 0; text-align: center; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; background: #9ca3af; }
+  .dot.on { background: #4ade80; }
+  @media (max-width: 760px) {
+    body { display: block; height: auto; }
+    header { flex-wrap: wrap; }
+    header .spacer { display: none; }
+    .layout { display: block; }
+    aside { border-right: none; border-bottom: 1px solid var(--line); }
+    .log { max-height: 60vh; }
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .spin { display: inline-block; width: 10px; height: 10px; border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%; animation: spin .8s linear infinite; vertical-align: -1px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>テストダッシュボード</h1>
+  <span class="sub">bank-sample · Java / JavaScript</span>
+  <span class="spacer"></span>
+  <span class="sub" title="サーバーとの接続"><span id="conn" class="dot"></span> <span id="connText">接続中…</span></span>
+  <button id="runSel" class="primary">選択したテストを実行</button>
+  <button id="runAll" class="ghost">すべて実行</button>
+  <button id="cancel" class="ghost" disabled>中止</button>
+</header>
+<div class="layout">
+  <aside>
+    <h2>テスト一式</h2>
+    <div id="suites"></div>
+    <div class="sel-actions">
+      <button id="selAll">すべて選択</button><button id="selNone">選択を外す</button><button id="selFailed">前回失敗したもの</button>
+    </div>
+    <h2>実行の履歴</h2>
+    <ul id="history" class="history"></ul>
+  </aside>
+  <main id="main"><div class="empty">左でテストを選んで「選択したテストを実行」を押してください。</div></main>
+</div>
+<script>
+"use strict";
+const $ = (s, el = document) => el.querySelector(s);
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+const LABEL = { passed: "成功", failed: "失敗", error: "エラー", skipped: "スキップ", running: "実行中", queued: "待機", cancelled: "中止", none: "未実行" };
+const fmtMs = (ms) => (ms < 1000 ? `${ms} ms` : ms < 60000 ? `${(ms / 1000).toFixed(1)} 秒` : `${Math.floor(ms / 60000)} 分 ${Math.round((ms % 60000) / 1000)} 秒`);
+const fmtWhen = (iso) => new Date(iso).toLocaleString("ja-JP", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit" });
+const badge = (st) => `<span class="badge b-${st}">${st === "running" ? '<span class="spin"></span> ' : ""}${LABEL[st] ?? st}</span>`;
+
+const state = {
+  suites: [], selected: new Set(JSON.parse(localStorage.getItem("td.selected") || "null") ?? []),
+  runs: [], active: null, view: null, // 表示中の実行（ケースとログを含む）
+  tab: null, pane: "results", filter: "all", query: "",
+};
+
+async function api(path, opts = {}) {
+  const res = await fetch(path, { ...opts, headers: { "Content-Type": "application/json", "X-Requested-With": "test-dashboard", ...(opts.headers || {}) } });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw Object.assign(new Error(body.error || res.statusText), { status: res.status, body });
+  return body;
+}
+
+// 各一式の「最後の結果」：履歴の新しい順に最初に見つかったもの
+function lastResult(id) {
+  if (state.active) { const s = state.active.suites.find((x) => x.id === id); if (s) return s; }
+  for (const run of state.runs) { const s = run.suites.find((x) => x.id === id); if (s) return s; }
+  return null;
+}
+
+function countsHtml(t) {
+  if (!t) return "";
+  return `<span class="pass">✓ ${t.passed}</span>　<span class="${t.failed ? "fail" : "muted"}">✗ ${t.failed}</span>　<span class="${t.skipped ? "skip" : "muted"}">↷ ${t.skipped}</span>　<span class="muted">/ ${t.total} 件</span>`;
+}
+
+function renderSuites() {
+  $("#suites").innerHTML = state.suites.map((s) => {
+    const r = lastResult(s.id);
+    const st = r ? r.status : "none";
+    return `<label class="suite ${state.selected.has(s.id) ? "sel" : ""}" data-id="${esc(s.id)}">
+      <input type="checkbox" ${state.selected.has(s.id) ? "checked" : ""}>
+      <span class="name">${esc(s.name)}</span>${badge(st)}
+      <span class="meta">${esc(s.lang)} · ${esc(s.tool)} · <code>${esc(s.cwd)}</code></span>
+      <span class="counts">${r && r.totals ? countsHtml(r.totals) + (r.durationMs ? `　<span class="muted">${fmtMs(r.durationMs)}</span>` : "") : ""}</span>
+    </label>`;
+  }).join("");
+  for (const el of document.querySelectorAll(".suite")) {
+    $("input", el).addEventListener("change", (e) => {
+      e.target.checked ? state.selected.add(el.dataset.id) : state.selected.delete(el.dataset.id);
+      saveSel(); renderSuites(); renderButtons();
+    });
+  }
+}
+const saveSel = () => localStorage.setItem("td.selected", JSON.stringify([...state.selected]));
+
+function renderButtons() {
+  const busy = !!state.active;
+  $("#runSel").disabled = busy || state.selected.size === 0;
+  $("#runAll").disabled = busy;
+  $("#cancel").disabled = !busy;
+}
+
+function renderHistory() {
+  const items = [...(state.active ? [state.active] : []), ...state.runs.filter((r) => !state.active || r.id !== state.active.id)];
+  $("#history").innerHTML = items.length ? items.map((r) => {
+    const failed = r.suites.reduce((n, s) => n + (s.totals?.failed || 0), 0);
+    return `<li data-id="${esc(r.id)}" class="${state.view?.id === r.id ? "sel" : ""}">
+      <span class="when">${fmtWhen(r.startedAt)}</span><span class="muted">${r.suites.length} 式</span>
+      ${failed ? `<span class="fail">✗${failed}</span>` : ""}${badge(r.status)}</li>`;
+  }).join("") : `<li class="muted">まだありません</li>`;
+  for (const li of document.querySelectorAll("#history li[data-id]")) li.addEventListener("click", () => openRun(li.dataset.id));
+}
+
+async function openRun(id, keepTab = false) {
+  const run = await api(`/api/runs/${encodeURIComponent(id)}`);
+  state.view = run;
+  if (!keepTab || !run.suites.some((s) => s.id === state.tab)) {
+    const firstBad = run.suites.find((s) => s.status === "failed" || s.status === "error");
+    state.tab = (firstBad || run.suites[0]).id;
+    state.pane = firstBad && firstBad.status === "error" ? "log" : "results";
+    state.filter = firstBad && firstBad.status === "failed" ? "failed" : "all";
+  }
+  renderHistory(); renderMain();
+}
+
+function totalsOf(run) {
+  const t = { total: 0, passed: 0, failed: 0, skipped: 0 };
+  for (const s of run.suites) if (s.totals) for (const k in t) t[k] += s.totals[k];
+  return t;
+}
+
+function renderMain() {
+  const run = state.view;
+  if (!run) return;
+  const t = totalsOf(run);
+  const dur = run.finishedAt ? new Date(run.finishedAt) - new Date(run.startedAt) : Date.now() - new Date(run.startedAt);
+  const s = run.suites.find((x) => x.id === state.tab);
+  $("#main").innerHTML = `
+    <div class="runhead"><h3>実行 ${esc(fmtWhen(run.startedAt))}</h3>${badge(run.status)}<span class="muted">${fmtMs(dur)}${run.finishedAt ? "" : "（経過）"}</span></div>
+    <div class="summary">
+      <div class="tile"><div class="v">${t.total}</div><div class="k">テスト</div></div>
+      <div class="tile"><div class="v pass">${t.passed}</div><div class="k">成功</div></div>
+      <div class="tile"><div class="v ${t.failed ? "fail" : ""}">${t.failed}</div><div class="k">失敗</div></div>
+      <div class="tile"><div class="v ${t.skipped ? "skip" : ""}">${t.skipped}</div><div class="k">スキップ</div></div>
+    </div>
+    <div class="tabs">${run.suites.map((x) => `<button class="tab ${x.id === state.tab ? "sel" : ""}" data-tab="${esc(x.id)}">${esc(x.name)} ${badge(x.status)}</button>`).join("")}</div>
+    <div class="toolbar">
+      <span class="seg"><button data-pane="results" class="${state.pane === "results" ? "sel" : ""}">結果</button><button data-pane="log" class="${state.pane === "log" ? "sel" : ""}">ログ</button></span>
+      ${state.pane === "results" ? `
+        <span class="seg">${["all", "failed", "skipped", "passed"].map((f) => `<button data-filter="${f}" class="${state.filter === f ? "sel" : ""}">${{ all: "すべて", failed: "失敗", skipped: "スキップ", passed: "成功" }[f]}</button>`).join("")}</span>
+        <input type="search" id="q" placeholder="テスト名・クラス・ファイルで絞り込む" value="${esc(state.query)}">` : ""}
+      <span class="muted">${s ? `${esc(s.tool)}${s.exitCode !== null && s.exitCode !== undefined ? ` · 終了コード ${s.exitCode}` : ""}${s.durationMs ? ` · ${fmtMs(s.durationMs)}` : ""}` : ""}</span>
+    </div>
+    <div id="pane"></div>`;
+  for (const b of document.querySelectorAll("[data-tab]")) b.addEventListener("click", () => { state.tab = b.dataset.tab; renderMain(); });
+  for (const b of document.querySelectorAll("[data-pane]")) b.addEventListener("click", () => { state.pane = b.dataset.pane; renderMain(); });
+  for (const b of document.querySelectorAll("[data-filter]")) b.addEventListener("click", () => { state.filter = b.dataset.filter; renderMain(); });
+  const q = $("#q");
+  if (q) q.addEventListener("input", () => { state.query = q.value; renderPane(); });
+  renderPane();
+}
+
+function renderPane() {
+  const s = state.view?.suites.find((x) => x.id === state.tab);
+  const pane = $("#pane");
+  if (!s || !pane) return;
+  if (state.pane === "log") {
+    pane.innerHTML = `<pre class="log" id="log"></pre>`;
+    const log = $("#log");
+    const lines = s.log || [];
+    log.textContent = lines.join("\n") || (s.status === "queued" ? "（待機中）" : "（ログはありません）");
+    if (!lines.length) log.dataset.empty = "1";
+    log.scrollTop = log.scrollHeight;
+    return;
+  }
+  if (s.status === "running" || s.status === "queued") {
+    pane.innerHTML = `<div class="empty">${s.status === "running" ? '<span class="spin"></span> 実行中です。終わると結果が出ます（進み具合は「ログ」）。' : "待機中です。"}</div>`;
+    return;
+  }
+  const q = state.query.trim().toLowerCase();
+  const cases = (s.cases || []).filter((c) => (state.filter === "all" || c.status === state.filter) &&
+    (!q || `${c.classname} ${c.suite} ${c.name}`.toLowerCase().includes(q)));
+  if (!s.cases?.length) {
+    pane.innerHTML = `<div class="empty">テストの結果がありません${s.status === "error" ? "（起動・ビルドに失敗した可能性があります。「ログ」を確認してください）" : ""}。</div>`;
+    return;
+  }
+  if (!cases.length) { pane.innerHTML = `<div class="empty">条件に合うテストはありません。</div>`; return; }
+  const groups = new Map();
+  for (const c of cases) {
+    const key = c.classname && c.classname !== "test" ? c.classname : (c.suite || c.classname || "(テスト)");
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(c);
+  }
+  const keys = [...groups.keys()].sort((a, b) => {
+    const fa = groups.get(a).some((c) => c.status === "failed"), fb = groups.get(b).some((c) => c.status === "failed");
+    return fa === fb ? a.localeCompare(b) : fa ? -1 : 1;
+  });
+  const open = state.filter !== "all" || q || keys.length <= 3;
+  pane.innerHTML = keys.map((k) => {
+    const list = groups.get(k);
+    const f = list.filter((c) => c.status === "failed").length;
+    const sk = list.filter((c) => c.status === "skipped").length;
+    const time = list.reduce((n, c) => n + c.time, 0);
+    return `<details class="group" ${open || f ? "open" : ""}>
+      <summary><span class="gname">${esc(k)}</span>
+        ${f ? `<span class="badge b-failed">失敗 ${f}</span>` : ""}${sk ? `<span class="badge b-skipped">スキップ ${sk}</span>` : ""}
+        <span class="muted">${list.length} 件 · ${time.toFixed(2)} 秒</span></summary>
+      ${list.map((c) => `<div class="case">
+        <span class="${{ passed: "pass", failed: "fail", skipped: "skip" }[c.status]}">${{ passed: "✓", failed: "✗", skipped: "↷" }[c.status]}</span>
+        <span>${c.suite && c.suite !== k && !k.endsWith(c.suite) ? `<span class="muted">${esc(c.suite)} › </span>` : ""}${esc(c.name)}</span>
+        <span class="t">${c.time.toFixed(3)} 秒</span>
+        ${c.status === "failed" ? `<div class="msg">${c.message ? `<div class="fail">${esc(c.message)}</div>` : ""}${c.detail ? `<pre>${esc(c.detail)}</pre>` : ""}</div>` : ""}
+      </div>`).join("")}
+    </details>`;
+  }).join("");
+}
+
+async function run(ids) {
+  try {
+    const { runId } = await api("/api/run", { method: "POST", body: JSON.stringify({ suites: ids }) });
+    state.tab = ids[0]; state.pane = "log"; state.filter = "all";
+    await refresh();
+    await openRun(runId, true);
+  } catch (e) {
+    alert(e.status === 409 ? "別のテストが実行中です。" : `実行できませんでした：${e.message}`);
+  }
+}
+
+async function refresh() {
+  const { active, runs } = await api("/api/runs");
+  state.active = active; state.runs = runs;
+  renderSuites(); renderHistory(); renderButtons();
+}
+
+function connect() {
+  const es = new EventSource("/api/events");
+  es.onopen = () => { $("#conn").classList.add("on"); $("#connText").textContent = "接続"; refresh(); };
+  es.onerror = () => { $("#conn").classList.remove("on"); $("#connText").textContent = "再接続中…"; };
+  es.addEventListener("run", async (e) => {
+    const r = JSON.parse(e.data);
+    const finished = r.status !== "running";
+    await refresh();
+    if (finished && state.view?.id === r.id) {
+      const prevTab = state.tab;
+      await openRun(r.id);
+      // 失敗があればそのタブ、なければ見ていたタブの結果を開く
+      if (!r.suites.some((s) => s.status === "failed" || s.status === "error")) { state.tab = prevTab; state.pane = "results"; renderMain(); }
+    }
+  });
+  es.addEventListener("suite", (e) => {
+    const { runId, suite } = JSON.parse(e.data);
+    if (state.active?.id === runId) {
+      const i = state.active.suites.findIndex((s) => s.id === suite.id);
+      if (i >= 0) state.active.suites[i] = suite;
+      renderSuites(); renderHistory();
+    }
+    if (state.view?.id === runId) {
+      const v = state.view.suites.find((s) => s.id === suite.id);
+      if (!v) return;
+      const wasRunning = v.status === "running";
+      Object.assign(v, suite);
+      if (suite.status === "running" && state.pane === "log") state.tab = suite.id; // ログは今動いている一式を追いかける
+      if (wasRunning && suite.status !== "running") {
+        // 終わった一式のケースを取り直す
+        api(`/api/runs/${encodeURIComponent(runId)}`).then((full) => {
+          const f = full.suites.find((s) => s.id === suite.id);
+          if (f && state.view?.id === runId) { Object.assign(v, f); renderMain(); }
+        });
+      }
+      renderMain();
+    }
+  });
+  es.addEventListener("log", (e) => {
+    const { runId, suite, line } = JSON.parse(e.data);
+    if (state.view?.id !== runId) return;
+    const v = state.view.suites.find((s) => s.id === suite);
+    if (!v) return;
+    (v.log ||= []).push(line);
+    if (state.tab === suite && state.pane === "log") {
+      const log = $("#log");
+      if (log) {
+        const atBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 40;
+        if (log.dataset.empty) { delete log.dataset.empty; log.textContent = line; } else log.textContent += "\n" + line;
+        if (atBottom) log.scrollTop = log.scrollHeight;
+      }
+    }
+  });
+}
+
+$("#runSel").addEventListener("click", () => run(state.suites.map((s) => s.id).filter((id) => state.selected.has(id))));
+$("#runAll").addEventListener("click", () => run(state.suites.map((s) => s.id)));
+$("#cancel").addEventListener("click", () => api("/api/cancel", { method: "POST" }).catch(() => {}));
+$("#selAll").addEventListener("click", () => { state.suites.forEach((s) => state.selected.add(s.id)); saveSel(); renderSuites(); renderButtons(); });
+$("#selNone").addEventListener("click", () => { state.selected.clear(); saveSel(); renderSuites(); renderButtons(); });
+$("#selFailed").addEventListener("click", () => {
+  state.selected = new Set(state.suites.filter((s) => ["failed", "error"].includes(lastResult(s.id)?.status)).map((s) => s.id));
+  saveSel(); renderSuites(); renderButtons();
+});
+setInterval(() => { if (state.view && !state.view.finishedAt) { const h = $(".runhead .muted"); if (h) h.textContent = `${fmtMs(Date.now() - new Date(state.view.startedAt))}（経過）`; } }, 1000);
+
+(async () => {
+  state.suites = await api("/api/suites");
+  if (!localStorage.getItem("td.selected")) state.suites.forEach((s) => state.selected.add(s.id));
+  await refresh();
+  const first = state.active || state.runs[0];
+  if (first) await openRun(first.id);
+  connect();
+})();
+</script>
+</body>
+</html>
